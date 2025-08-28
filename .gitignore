@@ -1,0 +1,156 @@
+
+
+# .gitignore 파일은 무시하지 않음
+!.gitignore
+
+# 모든 폴더 포함 (하위 폴더도 재귀적으로 허용)
+!*/
+
+# 모든 .py 파일 포함 (하위 폴더 포함)
+!*.py
+
+# 무시하고 싶은 폴더/파일 (선택적)
+__pycache__/
+*.pyc
+.git/
+.venv/
+*.log
+*.pt
+checkpoints/
+
+
+
+insight_face_package_model/
+
+runs/
+
+wandb/
+
+*.jpg
+celebA/
+pari/
+split_pari
+*.deb
+__pycache__/
+*.pyc
+*.pkl
+
+
+!models/backbone/
+
+# === 이미지 파일 ===
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.tif
+*.webp
+*.ico
+*.svg
+
+# === 데이터셋 디렉토리 ===
+celebA/
+pari/
+pair/
+split_pari/
+split_pair/
+man/
+temp/
+
+# === 패키지 및 설치 파일 ===
+*.deb
+*.rpm
+*.msi
+*.dmg
+*.pkg
+*.tar.gz
+*.tar.xz
+*.zip
+*.rar
+*.7z
+
+# === Python 관련 ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+
+models/weight/
+# === 가상환경 ===
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# === 캐시 및 임시 파일 ===
+*.pkl
+*.cache
+.pytest_cache/
+*.tmp
+*.temp
+*~
+.DS_Store
+Thumbs.db
+
+# === 결과 파일 ===
+LOG.txt
+output.log
+embeddings_cache_*
+
+# === AI 모델 파일 ===
+
+*.onnx
+*.pth
+*.pt
+*.h5
+*.pb
+*.tflite
+*.mlmodel
+
+# === IDE 및 에디터 ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+
+# === Docker 관련 (필요한 것들은 제외) ===
+# Docker 빌드 스크립트는 유지: *.sh 파일들
+# Dockerfile은 유지
+# requirements*.txt는 유지
+
+# === OS 관련 ===
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# === 기타 불필요한 파일 ===
+*.backup
+*.old
+*.orig
+node_modules/
+.npm
+.node_repl_history
+
