@@ -48,7 +48,8 @@ def find_max_batch_size(model, input_shape, device):
     model.eval()
     max_found_bs = 0
     mid = 64
-    while max_found_bs <= 1024 * 5:
+    limit = 1024 * 5
+    while max_found_bs <= limit:
         if mid == 64:
             pass
         else:
@@ -60,16 +61,17 @@ def find_max_batch_size(model, input_shape, device):
             max_found_bs = mid
 
             print(f"✅ Batch size {mid} succeeded.")
+            mid = mid * 2
         except RuntimeError as e:
             if 'out of memory' in str(e).lower():
                 print(f"❌ Batch size {mid} failed (OOM).")
+                return max_found_bs
             else:
                 print(f"An unexpected error occurred: {e}")
                 raise e
         finally:
             torch.cuda.empty_cache()
-            
-    print(f"Found maximum batch size: {max_found_bs}")
+    print(f"Max batch size search completed. Maximum found 한계선 {limit}: {max_found_bs}")
     return max_found_bs
 
 def main_worker(rank, world_size, args):
@@ -147,6 +149,7 @@ def main_worker(rank, world_size, args):
         logging.info('==' * 30)
         logging.info(f"Model total params: {backbone_params:,}")
         logging.info(f"Model trainable params: {trainable_backbone_params:,}")
+        logging.info(f"traineable params percentage: {100 * trainable_backbone_params / backbone_params:.2f}%")
         logging.info('==' * 30)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
@@ -252,11 +255,11 @@ def main_worker(rank, world_size, args):
 
 def main():
     parser = argparse.ArgumentParser(description='Argparse')
-    parser.add_argument('--find_batch_size', default=True, help='Find the maximum batch size before training')
+    parser.add_argument('--find_batch_size', default=False, help='Find the maximum batch size before training')
     parser.add_argument('--wandb_run', type=str, choices=['yes', 'no'], default='no', help='Use wandb or not')
     parser.add_argument('--wandb_name', type=str, default='efficientnetv2_s_sunglasses_head_', help='wandb experiment name')
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=64 * 2, help='Batch size for training')
     args = parser.parse_args()
 
     if args.find_batch_size:
@@ -264,9 +267,9 @@ def main():
         temp_model = EfficientNetV2_S()
         max_bs = find_max_batch_size(temp_model, input_shape=(3, 320, 320), device='cuda:0')
         if max_bs:
-            print(f"Maximum possible batch size is {max_bs}. You can set --batch_size {max_bs} for the next run.")
+            print(f"Maximum possible batch size is {max_bs}. You can set --batch_size {max_bs//2} for the next run.")
+            max_bs = max_bs // 2
             args.batch_size = max_bs
-        return
 
     for var in vars(args):
         print(f"{var} : {getattr(args, var)}")
