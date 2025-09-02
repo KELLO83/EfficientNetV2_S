@@ -10,7 +10,7 @@ import numpy as np
 import cv2
 import logging
 import os
-from backbone.model import EfficientNetV2_S
+from backbone.model import EfficientNetV2_S , EfficientNetV2_L
 import torchinfo
 from sklearn.model_selection import train_test_split
 from utils.early_stop import EarlyStopping
@@ -80,24 +80,33 @@ def main_worker(rank, world_size, args):
     if world_size > 1:
         setup_ddp(rank, world_size)
     
-    if rank == 0 and args.wandb_run == 'yes':
+    if rank == 0 and args.wandb:
         wandb_init(name=f'{args.wandb_name}')
 
     torch.backends.cudnn.benchmark = True
     device = torch.device(f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
 
-    wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/wear')
-    no_wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/nowear')
+    # wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/wear')
+    # no_wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/nowear')
+
+    wear = pathlib.Path('/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/sunglass/refining_Yaw')
+
+    no_wear = pathlib.Path('/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/earing/refining_Yaw')
+    nowear_plus = pathlib.Path('/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/glasses/refining_Yaw')
 
     wear_list = list(wear.glob('**/*.jpg'))
-    no_wear_list = list(no_wear.glob('**/*.jpg'))
+    no_wear_list = list(no_wear.glob('**/*.jpg')) + list(nowear_plus.glob('**/*.jpg'))
     
+    if wear_list == [] or no_wear_list == []:
+        print("wear list {} or no wear list {} is empty.".format(wear_list, no_wear_list))
+        raise ValueError("No image files found in the specified directories.")
+
     if rank == 0:
         logging.info(f"wear num : {len(wear_list)}")
         logging.info(f"no wear num : {len(no_wear_list)}")
 
-    wear_labels = [0] * len(wear_list)
-    no_wear_labels = [1] * len(no_wear_list)
+    wear_labels = [1] * len(wear_list)
+    no_wear_labels = [0] * len(no_wear_list)
 
     all_data = wear_list + no_wear_list
     all_labels = wear_labels + no_wear_labels
@@ -106,10 +115,11 @@ def main_worker(rank, world_size, args):
         all_data, all_labels, test_size=0.2, random_state=42, stratify=all_labels
     )
     
-    train_wear = [path for path, label in zip(train_list, train_labels) if label == 0]
-    train_no_wear = [path for path, label in zip(train_list, train_labels) if label == 1]
-    val_wear = [path for path, label in zip(val_list, val_labels) if label == 0]
-    val_no_wear = [path for path, label in zip(val_list, val_labels) if label == 1]
+    train_wear = [path for path, label in zip(train_list, train_labels) if label == 1]
+    train_no_wear = [path for path, label in zip(train_list, train_labels) if label == 0]
+
+    val_wear = [path for path, label in zip(val_list, val_labels) if label == 1]
+    val_no_wear = [path for path, label in zip(val_list, val_labels) if label == 0]
 
     train_dataset = Sun_glasses_Dataset(wear_data=train_wear, no_wear_data=train_no_wear)
     val_dataset = Sun_glasses_Dataset(wear_data=val_wear, no_wear_data=val_no_wear)
@@ -129,19 +139,27 @@ def main_worker(rank, world_size, args):
     criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
 
     model = EfficientNetV2_S().to(device)
-    
+    #weight = torch.load('best_model.pth', map_location=device)
+
+    torch.backends.cudnn.benchmark = True
+    # model.load_state_dict(weight)
+    model = torch.compile(model)
+
     if world_size > 1:
         model = DDP(model, device_ids=[rank])
 
-    if rank == 0:
-        torchinfo.summary(
-            model=model,
-            input_size=(1, 3, 320, 320),
-            verbose=True,
-            col_names=["input_size", "output_size", "trainable"],
-            row_settings=["depth"],
-            mode='eval'
-        )
+    if rank == 0 and args.wandb:
+        wandb.watch(model, log='all', log_freq=100)
+
+    # if rank == 0:
+    #     torchinfo.summary(
+    #         model=model,
+    #         input_size=(1, 3, 320, 320),
+    #         verbose=True,
+    #         col_names=["input_size", "output_size", "trainable"],
+    #         row_settings=["depth"],
+    #         mode='eval'
+    #     )
 
     if rank == 0:
         backbone_params = sum(p.numel() for p in model.parameters())
@@ -216,7 +234,7 @@ def main_worker(rank, world_size, args):
 
         val_accuracy = 100 * correct_val / total_val
         
-        if rank == 0 and args.wandb_run == 'yes':
+        if rank == 0 and args.wandb:
             wandb.log({
                "Train Loss": train_loss / len(trainloader),
                "Train Accuracy": train_accuracy,
@@ -231,8 +249,17 @@ def main_worker(rank, world_size, args):
             if val_accuracy > best_val_acc:
                 best_val_acc = val_accuracy
                 os.makedirs('checkpoints', exist_ok=True)
-                torch.save(model.module.state_dict() if world_size > 1 else model.state_dict(), os.path.join('checkpoints','best_model.pth'))
-                logging.info("Saved best model.")
+
+
+                checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.module.state_dict() if world_size > 1 else model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_val_acc': best_val_acc
+                }
+                torch.save(checkpoint, os.path.join('checkpoints','best_model.pth'))
+                logging.info("Saved best model and optimizer state.")
 
             early_stopping(val_loss / len(valloader))
 
@@ -256,10 +283,10 @@ def main_worker(rank, world_size, args):
 def main():
     parser = argparse.ArgumentParser(description='Argparse')
     parser.add_argument('--find_batch_size', default=False, help='Find the maximum batch size before training')
-    parser.add_argument('--wandb_run', type=str, choices=['yes', 'no'], default='no', help='Use wandb or not')
-    parser.add_argument('--wandb_name', type=str, default='efficientnetv2_s_sunglasses_head_', help='wandb experiment name')
+    parser.add_argument('--wandb', action='store_true', default=False, help='Use wandb or not')
+    parser.add_argument('--wandb_name', type=str, default='efficientnetv2_L', help='wandb experiment name')
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=64 * 2, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default= 256//2, help='Batch size for training')
     args = parser.parse_args()
 
     if args.find_batch_size:
@@ -267,8 +294,8 @@ def main():
         temp_model = EfficientNetV2_S()
         max_bs = find_max_batch_size(temp_model, input_shape=(3, 320, 320), device='cuda:0')
         if max_bs:
-            print(f"Maximum possible batch size is {max_bs}. You can set --batch_size {max_bs//2} for the next run.")
-            max_bs = max_bs // 2
+            print(f"Maximum possible batch size is {max_bs}. You can set --batch_size {max_bs} for the next run.")
+            max_bs = max_bs 
             args.batch_size = max_bs
 
     for var in vars(args):
