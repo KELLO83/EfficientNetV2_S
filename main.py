@@ -21,7 +21,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 import torch.multiprocessing as mp
-
+from natsort import natsorted
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 def setup_ddp(rank, world_size):
@@ -96,6 +96,29 @@ def main_worker(rank, world_size, args):
 
     wear_list = list(wear.glob('**/*.jpg'))
     no_wear_list = list(no_wear.glob('**/*.jpg')) + list(nowear_plus.glob('**/*.jpg'))
+
+    """ ++++ 추가 데이터셋 절반만 사용 ++++ """
+    q = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/wear/wear_sunglass_korean')
+    subfolders = natsorted([f for f in q.iterdir() if f.is_dir()])
+    half = len(subfolders) // 2
+    selected_folders = subfolders[:half]  
+    selected_images = []
+    for folder in selected_folders:
+        selected_images += natsorted(list(folder.glob('*.jpg')))
+    if selected_images == []:
+        raise ValueError("No image files found in the specified directories.")
+    wear_list = wear_list + selected_images
+
+    v = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/nowear/no_wear_sunglass_korean')
+    subfolders = natsorted([f for f in q.iterdir() if f.is_dir()])
+    half = len(subfolders) // 2
+    selected_folders = subfolders[:half]  
+    selected_images = []
+    for folder in selected_folders:
+        selected_images += natsorted(list(folder.glob('*.jpg')))
+    if selected_images == []:
+        raise ValueError("No image files found in the specified directories.")
+    no_wear_list = no_wear_list + selected_images
     
     if wear_list == [] or no_wear_list == []:
         print("wear list {} or no wear list {} is empty.".format(wear_list, no_wear_list))
@@ -156,10 +179,10 @@ def main_worker(rank, world_size, args):
         logging.info("Missing keys:", result.missing_keys)
         logging.info("Unexpected keys:", result.unexpected_keys)
         logging.info(f"{result}")
-        
+
 
     torch.backends.cudnn.benchmark = True
-    model = torch.compile(model)
+    # model = torch.compile(model)
 
     if world_size > 1:
         model = DDP(model, device_ids=[rank])

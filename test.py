@@ -116,13 +116,11 @@ print(f"Precision: {precision:.4f}")
 print(f"Recall (Sensitivity): {recall:.4f}")
 print(f"F1-Score: {f1_score:.4f}")
 
-
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
 
 cm = confusion_matrix(all_labels, all_preds)
-cm.figure_.savefig('confusion_matrix_cm.png')
 plt.figure(figsize=(5, 4))
 cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
 im = plt.imshow(cm_normalized, interpolation='nearest', cmap=plt.cm.Blues)
@@ -130,5 +128,16 @@ plt.title('Normalized Confusion Matrix')
 plt.colorbar(im)
 plt.xlabel('Predicted label')
 plt.ylabel('True label')
+
+
+labels = np.array([['TN', 'FP'], ['FN', 'TP']])
+for i in range(cm.shape[0]):
+    for j in range(cm.shape[1]):
+        text = f"{labels[i, j]}\n{cm[i, j]}"
+        plt.text(j, i, text, ha="center", va="center", color="red", fontsize=12)
+
+plt.xticks([0, 1], ['No-Wear', 'Wear'])
+plt.yticks([0, 1], ['No-Wear', 'Wear'])
+plt.tight_layout()
+plt.savefig('confusion_matrix_annotated.png')
 plt.show()
-plt.savefig('confusion_matrix.png')
