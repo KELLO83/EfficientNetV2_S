@@ -7,7 +7,7 @@ import cv2
 import os
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
-
+import numpy as np
 class SunglassDataset(Dataset):
     """
     Custom Dataset for sunglass wear/no-wear classification.
@@ -35,9 +35,19 @@ class SunglassDataset(Dataset):
             
         return image, label
 
-weight_path = 'best_model.pth'
+weight_path = 'checkpoints/best_model.pth'
+weight = torch.load(weight_path)
+
+if hasattr(weight, 'state_dict'):
+    model_weight = weight['state_dict']
+else:
+    model_weight = weight
+
 model = EfficientNetV2_S()
-model.load_state_dict(torch.load(weight_path))
+result = model.load_state_dict(model_weight)
+print("Missing keys:", result.missing_keys)
+print("Unexpected keys:", result.unexpected_keys)
+print(f"{result}")
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
 model.eval()
@@ -52,18 +62,20 @@ transform = v2.Compose([
 # wear_path = pathlib.Path('/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/sunglass/refining_Yaw')
 # nowear_path = pathlib.Path('/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/earing/refining_Yaw')
 
-wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/wear')
-no_wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/nowear')
+wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/wear/wear_sunglass_korean')
+no_wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/nowear/no_wear_sunglass_korean')
 
-wear_files = natsort.natsorted(list(wear.glob('*.jpg')))
-nowear_files = natsort.natsorted(list(no_wear.glob('*.jpg')))
+wear_files = natsort.natsorted(list(wear.glob('**/*.jpg')))
+nowear_files = natsort.natsorted(list(no_wear.glob('**/*.jpg')))
 
 print(f"Found {len(wear_files)} images with sunglasses (positive class, label 1).")
 print(f"Found {len(nowear_files)} images without sunglasses (negative class, label 0).")
 
-
+if not wear_files or not nowear_files:
+    print(len(wear_files), len(nowear_files))
+    raise ValueError("No image files found in the specified directories.")
 full_dataset = SunglassDataset(wear_files=wear_files, nowear_files=nowear_files, transform=transform)
-data_loader = DataLoader(full_dataset, batch_size=128, shuffle=False, num_workers=4)
+data_loader = DataLoader(full_dataset, batch_size=16, shuffle=False, num_workers=4)
 
 tp, tn, fp, fn = 0, 0, 0, 0
 
@@ -110,6 +122,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
 
 cm = confusion_matrix(all_labels, all_preds)
+cm.figure_.savefig('confusion_matrix_cm.png')
 plt.figure(figsize=(5, 4))
 cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
 im = plt.imshow(cm_normalized, interpolation='nearest', cmap=plt.cm.Blues)

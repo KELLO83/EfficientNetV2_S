@@ -138,7 +138,7 @@ def main_worker(rank, world_size, args):
 
     criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
 
-    model = EfficientNetV2_S().to(device)
+    model = EfficientNetV2_L().to(device)
     #weight = torch.load('best_model.pth', map_location=device)
 
     torch.backends.cudnn.benchmark = True
