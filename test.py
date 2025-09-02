@@ -38,8 +38,8 @@ class SunglassDataset(Dataset):
 weight_path = 'checkpoints/best_model.pth'
 weight = torch.load(weight_path)
 
-if hasattr(weight, 'state_dict'):
-    model_weight = weight['state_dict']
+if hasattr(weight, 'model_state_dict'):
+    model_weight = weight['model_state_dict']
 else:
     model_weight = weight
 

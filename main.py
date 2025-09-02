@@ -138,11 +138,27 @@ def main_worker(rank, world_size, args):
 
     criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
 
-    model = EfficientNetV2_L().to(device)
-    #weight = torch.load('best_model.pth', map_location=device)
+
+    if args.model == 'efficientnetv2_s':
+        model = EfficientNetV2_S().to(device)
+
+    elif args.model == 'efficientnetv2_l':
+        model = EfficientNetV2_L().to(device)
+
+    if args.pretrained and os.path.isfile(args.weight_path):
+        logging.info(f"Loading weights from {args.weight_path}")
+        checkpoint = torch.load(args.weight_path, map_location=device)
+        if hasattr(checkpoint, 'model_state_dict'):
+            model_weight = checkpoint['model_state_dict']
+        else:
+            model_weight = checkpoint
+        result = model.load_state_dict(model_weight)
+        logging.info("Missing keys:", result.missing_keys)
+        logging.info("Unexpected keys:", result.unexpected_keys)
+        logging.info(f"{result}")
+        
 
     torch.backends.cudnn.benchmark = True
-    # model.load_state_dict(weight)
     model = torch.compile(model)
 
     if world_size > 1:
@@ -282,12 +298,17 @@ def main_worker(rank, world_size, args):
 
 def main():
     parser = argparse.ArgumentParser(description='Argparse')
+    parser.add_argument('--model', type=str, default='efficientnetv2_s', help='Model type: efficientnetv2_s or efficientnetv2_l')
+    parser.add_argument('--pretrained', action='store_true', default=False, help='Use pretrained weights or not')
+    parser.add_argument('--weight_path' ,type=str, default='checkpoints/best_mode.pth', help='Path to model weights')
     parser.add_argument('--find_batch_size', default=False, help='Find the maximum batch size before training')
     parser.add_argument('--wandb', action='store_true', default=False, help='Use wandb or not')
     parser.add_argument('--wandb_name', type=str, default='efficientnetv2_L', help='wandb experiment name')
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default= 256//2, help='Batch size for training')
     args = parser.parse_args()
+
+    args.wandb = True
 
     if args.find_batch_size:
         print("Finding max batch size...")
