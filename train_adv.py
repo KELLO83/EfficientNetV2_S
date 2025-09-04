@@ -184,6 +184,15 @@ def main_worker(rank, world_size, args):
 
     model = get_model(args.model).to(device)
     
+    if args.pretrained and os.path.isfile(args.pretrained_path):
+        if rank == 0:
+            logging.info(f"Loading pretrained weights from {args.pretrained_path}")            
+        weight = torch.load(args.pretrained_path, map_location=device)
+        result = model.load_state_dict(weight , strict=True)
+        if not result.missing_keys and not result.unexpected_keys:
+            if rank == 0:
+                logging.info("Pretrained weights loaded successfully.")
+
     if args.compile and hasattr(torch, 'compile'):
         model = torch.compile(model)
 
@@ -327,6 +336,8 @@ def main():
     parser.add_argument('--domain_lambda', type=float, default=1.0, help='Weight for the domain loss in DANN')
     parser.add_argument('--domain_b_fraction', type=float, default=0.2, help='Fraction of domain B data in each batch for balanced sampling.')
     parser.add_argument('--compile', action='store_true', help='Use torch.compile for model optimization')
+    parser.add_argument('--pretrained', action='store_true', help='Use pretrained weights for the backbone model')
+    parser.add_argument('--pretrained_path', type=str, default='effcientnet640_s/efficientnetv2_s_dann_best.pth', help='Path to pretrained weights file')
 
     # Data arguments
     parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/sunglass/refining_yaw_yaw', help='Directory for "wear" images in Domain A')
@@ -337,7 +348,7 @@ def main():
     parser.add_argument('--extra_data_fraction', type=float, default=0.25, help='Fraction of extra data to use')
 
     # Training arguments
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=64 , help='Batch size for training')
     parser.add_argument('--no_confirm', action='store_true', help='Skip argument confirmation prompt')
 

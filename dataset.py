@@ -2,6 +2,8 @@ import torchvision.transforms.v2 as v2
 from torch.utils import data
 import torch
 import cv2
+import pathlib # Added for pathlib.Path
+from typing import List, Tuple, Callable, Dict, Any # Added for type hints
 
 class Sun_glasses_Dataset(data.Dataset):
     def __init__(self, wear_data=None, no_wear_data=None , train = True):
@@ -52,9 +54,9 @@ class Domain_Sun_Glasses_Dataset(data.Dataset):
     A dataset for Domain-Adversarial training.
     It returns an image, its class label (wear/no-wear), and its domain label.
     """
-    def __init__(self, domain_A_wear_data=None, domain_A_nowear_data=None, 
+    def __init__(self, domain_A_wear_data=None, domain_A_nowear_data=None,
                  domain_B_wear_data=None, domain_B_nowear_data=None, transform=None):
-        
+
         self.transform = transform
 
         # Consolidate paths and create corresponding labels
@@ -67,7 +69,7 @@ class Domain_Sun_Glasses_Dataset(data.Dataset):
             self.paths.extend(domain_A_wear_data)
             self.class_labels.extend([1] * len(domain_A_wear_data))
             self.domain_labels.extend([0] * len(domain_A_wear_data))
-        
+
         if domain_A_nowear_data:
             self.paths.extend(domain_A_nowear_data)
             self.class_labels.extend([0] * len(domain_A_nowear_data))
@@ -83,7 +85,7 @@ class Domain_Sun_Glasses_Dataset(data.Dataset):
             self.paths.extend(domain_B_nowear_data)
             self.class_labels.extend([0] * len(domain_B_nowear_data))
             self.domain_labels.extend([1] * len(domain_B_nowear_data))
-            
+
         # Convert labels to tensors
         self.class_labels = torch.tensor(self.class_labels, dtype=torch.long)
         self.domain_labels = torch.tensor(self.domain_labels, dtype=torch.long)
@@ -106,5 +108,63 @@ class Domain_Sun_Glasses_Dataset(data.Dataset):
 
         class_label = self.class_labels[idx]
         domain_label = self.domain_labels[idx]
-        
+
         return tensor_image, class_label, domain_label
+
+
+class SPMLDataset(data.Dataset):
+    """
+    SPML (Single Positive Multi-Label) 학습을 위한 커스텀 데이터셋.
+    단일 정수 라벨을 4개의 클래스에 대한 원-핫 인코딩 벡터로 변환합니다.
+
+    클래스 정의:
+    0: 평범한사람
+    1: 모자쓴사람
+    2: 선글라쓴사람
+    3: 마스크착용한사람
+    """
+    def __init__(self,
+                 file_paths: List[pathlib.Path],
+                 labels: List[int],
+                 transform: Callable = None):
+        """
+        데이터셋을 초기화합니다.
+
+        Args:
+            file_paths (List[pathlib.Path]): 이미지 파일 경로 리스트.
+            labels (List[int]): 각 이미지에 해당하는 단일 정수 라벨 리스트 (0, 1, 2, 3).
+            transform (Callable, optional): 이미지에 적용할 변환 함수. 기본값은 None.
+        """
+        if len(file_paths) != len(labels):
+            raise ValueError("file_paths와 labels의 길이가 일치해야 합니다.")
+
+        self.file_paths = file_paths
+        self.labels = labels
+        self.transform = transform
+
+        self.class_names: List[str] = ["평범한사람", "모자쓴사람", "선글라쓴사람", "마스크착용한사람"]
+        self.num_classes: int = len(self.class_names)
+
+
+        if not all(0 <= label < self.num_classes for label in labels):
+            raise ValueError(f"라벨은 0에서 {self.num_classes - 1} 사이의 정수여야 합니다.")
+
+    def __len__(self) -> int:
+        return len(self.file_paths)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        file_path = self.file_paths[idx]
+        label = self.labels[idx]
+
+        image = cv2.imread(str(file_path))
+        if image is None:
+            raise FileNotFoundError(f"이미지를 로드할 수 없습니다: {file_path}")
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+
+        if self.transform:
+            image = self.transform(image)
+
+        one_hot_label = torch.nn.functional.one_hot(torch.tensor(label, dtype=torch.long), num_classes=self.num_classes).float()
+
+        return image, one_hot_label
