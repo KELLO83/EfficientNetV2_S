@@ -35,7 +35,7 @@ def cleanup_ddp():
 def wandb_init(name='None'):
     name = name
     wandb.init(
-        project='EfficientNetV2_S',
+        project='EfficientNetV2',
         name=name,
     )
 
@@ -74,8 +74,33 @@ def find_max_batch_size(model, input_shape, device):
     print(f"Max batch size search completed. Maximum found 한계선 {limit}: {max_found_bs}")
     return max_found_bs
 
+def get_model(model_name):
+    if model_name == 'efficientnetv2_s':
+        model = EfficientNetV2_S()
+    elif model_name == 'efficientnetv2_l':
+        model = EfficientNetV2_L()
+    else:
+        raise ValueError(f"Model {model_name} not recognized.")
+    return model
+
+def load_extra_data(path, fraction):
+    p = pathlib.Path(path)
+    if not p.exists():
+        logging.warning(f"Extra data path not found: {path}")
+        return []
+    subfolders = natsorted([f for f in p.iterdir() if f.is_dir()])
+    num_folders_to_use = int(len(subfolders) * fraction)
+    selected_folders = subfolders[:num_folders_to_use]
+    selected_images = []
+    for folder in selected_folders:
+        selected_images.extend(natsorted(list(folder.glob('*.jpg'))))
+    if not selected_images:
+        logging.warning(f"No image files found in the specified extra data directory: {path}")
+    return selected_images
+
 def main_worker(rank, world_size, args):
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    if rank == 0:
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
     if world_size > 1:
         setup_ddp(rank, world_size)
@@ -86,43 +111,24 @@ def main_worker(rank, world_size, args):
     torch.backends.cudnn.benchmark = True
     device = torch.device(f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
 
-    # wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/wear')
-    # no_wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/nowear')
+    wear_path = pathlib.Path(args.wear_dir)
+    nowear_path = pathlib.Path(args.nowear_dir)
+    nowear_plus_path = pathlib.Path(args.nowear_plus_dir)
 
-    wear = pathlib.Path('/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/sunglass/refining_Yaw')
+    wear_list = list(wear_path.glob('**/*.jpg')) if wear_path.exists() else []
+    no_wear_list = []
+    if nowear_path.exists():
+        no_wear_list.extend(list(nowear_path.glob('**/*.jpg')))
+    if nowear_plus_path.exists():
+        no_wear_list.extend(list(nowear_plus_path.glob('**/*.jpg')))
 
-    no_wear = pathlib.Path('/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/earing/refining_Yaw')
-    nowear_plus = pathlib.Path('/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/glasses/refining_Yaw')
 
-    wear_list = list(wear.glob('**/*.jpg'))
-    no_wear_list = list(no_wear.glob('**/*.jpg')) + list(nowear_plus.glob('**/*.jpg'))
+    if args.extra_data_fraction > 0:
+        wear_list.extend(load_extra_data(args.extra_wear_dir, args.extra_data_fraction))
+        no_wear_list.extend(load_extra_data(args.extra_nowear_dir, args.extra_data_fraction))
 
-    """ ++++ 추가 데이터셋 절반만 사용 ++++ """
-    q = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/wear/wear_sunglass_korean')
-    subfolders = natsorted([f for f in q.iterdir() if f.is_dir()])
-    half = len(subfolders) // 2
-    selected_folders = subfolders[:half]  
-    selected_images = []
-    for folder in selected_folders:
-        selected_images += natsorted(list(folder.glob('*.jpg')))
-    if selected_images == []:
-        raise ValueError("No image files found in the specified directories.")
-    wear_list = wear_list + selected_images
-
-    v = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/nowear/no_wear_sunglass_korean')
-    subfolders = natsorted([f for f in q.iterdir() if f.is_dir()])
-    half = len(subfolders) // 2
-    selected_folders = subfolders[:half]  
-    selected_images = []
-    for folder in selected_folders:
-        selected_images += natsorted(list(folder.glob('*.jpg')))
-    if selected_images == []:
-        raise ValueError("No image files found in the specified directories.")
-    no_wear_list = no_wear_list + selected_images
-    
-    if wear_list == [] or no_wear_list == []:
-        print("wear list {} or no wear list {} is empty.".format(wear_list, no_wear_list))
-        raise ValueError("No image files found in the specified directories.")
+    if not wear_list or not no_wear_list:
+        raise ValueError("Image lists are empty. Please check data paths.")
 
     if rank == 0:
         logging.info(f"wear num : {len(wear_list)}")
@@ -145,7 +151,7 @@ def main_worker(rank, world_size, args):
     val_no_wear = [path for path, label in zip(val_list, val_labels) if label == 0]
 
     train_dataset = Sun_glasses_Dataset(wear_data=train_wear, no_wear_data=train_no_wear)
-    val_dataset = Sun_glasses_Dataset(wear_data=val_wear, no_wear_data=val_no_wear)
+    val_dataset = Sun_glasses_Dataset(wear_data=val_wear, no_wear_data=val_no_wear , train=False)
 
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank) if world_size > 1 else None
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
@@ -154,51 +160,46 @@ def main_worker(rank, world_size, args):
     valloader = data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True, num_workers=os.cpu_count()//world_size, sampler=val_sampler)
 
     if len(train_no_wear) > 0 and len(train_wear) > 0:
-        weight_for_no_wear = len(train_wear) / len(train_no_wear)
-        class_weights = torch.tensor([1.0, weight_for_no_wear], device=device)
+        count_no_wear = len(train_no_wear)
+        count_wear = len(train_wear)
+        
+        # Calculate weight for each class to handle imbalance.
+        # The weight for a class is inversely proportional to its number of samples.
+        # This gives higher penalty for misclassifying the minority class.
+        weight_for_class_0 = (count_no_wear + count_wear) / (2.0 * count_no_wear)
+        weight_for_class_1 = (count_no_wear + count_wear) / (2.0 * count_wear)
+        
+        # The order in the tensor must match the class indices (0, 1)
+        class_weights = torch.tensor([weight_for_class_0, weight_for_class_1], device=device)
+        
+        if rank == 0:
+            logging.info(f"Handling class imbalance. Samples: [No-Wear: {count_no_wear}, Wear: {count_wear}]")
+            logging.info(f"Applying weights: [No-Wear: {weight_for_class_0:.2f}, Wear: {weight_for_class_1:.2f}]")
     else:
         class_weights = None
 
     criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
 
-
-    if args.model == 'efficientnetv2_s':
-        model = EfficientNetV2_S().to(device)
-
-    elif args.model == 'efficientnetv2_l':
-        model = EfficientNetV2_L().to(device)
+    model = get_model(args.model).to(device)
+    model = torch.compile(model)
 
     if args.pretrained and os.path.isfile(args.weight_path):
         logging.info(f"Loading weights from {args.weight_path}")
         checkpoint = torch.load(args.weight_path, map_location=device)
-        if hasattr(checkpoint, 'model_state_dict'):
+        
+        if 'model_state_dict' in checkpoint:
             model_weight = checkpoint['model_state_dict']
         else:
             model_weight = checkpoint
-        result = model.load_state_dict(model_weight)
-        logging.info("Missing keys:", result.missing_keys)
-        logging.info("Unexpected keys:", result.unexpected_keys)
-        logging.info(f"{result}")
-
-
-    torch.backends.cudnn.benchmark = True
-    # model = torch.compile(model)
+            
+        result = model.load_state_dict(model_weight, strict=False)
+        logging.info(f"Weight loading result: {result}")
 
     if world_size > 1:
         model = DDP(model, device_ids=[rank])
 
     if rank == 0 and args.wandb:
         wandb.watch(model, log='all', log_freq=100)
-
-    # if rank == 0:
-    #     torchinfo.summary(
-    #         model=model,
-    #         input_size=(1, 3, 320, 320),
-    #         verbose=True,
-    #         col_names=["input_size", "output_size", "trainable"],
-    #         row_settings=["depth"],
-    #         mode='eval'
-    #     )
 
     if rank == 0:
         backbone_params = sum(p.numel() for p in model.parameters())
@@ -210,7 +211,12 @@ def main_worker(rank, world_size, args):
         logging.info('==' * 30)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
-    scheduler = CosineAnnealingLR(optimizer, T_max=10, eta_min=1e-6)
+    #scheduler = CosineAnnealingLR(optimizer, T_max=10, eta_min=1e-6)
+
+    scheduler = PolynomialLRWarmup(
+        optimizer, warmup_iters=10, total_iters=args.max_epoch, power=1.0 , limit_lr = 1e-7
+    )
+
     early_stopping = EarlyStopping(patience=10, verbose=True)
 
     best_val_acc = 0.0
@@ -289,7 +295,6 @@ def main_worker(rank, world_size, args):
                 best_val_acc = val_accuracy
                 os.makedirs('checkpoints', exist_ok=True)
 
-
                 checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': model.module.state_dict() if world_size > 1 else model.state_dict(),
@@ -320,31 +325,48 @@ def main_worker(rank, world_size, args):
         cleanup_ddp()
 
 def main():
-    parser = argparse.ArgumentParser(description='Argparse')
-    parser.add_argument('--model', type=str, default='efficientnetv2_s', help='Model type: efficientnetv2_s or efficientnetv2_l')
-    parser.add_argument('--pretrained', action='store_true', default=False, help='Use pretrained weights or not')
-    parser.add_argument('--weight_path' ,type=str, default='checkpoints/best_mode.pth', help='Path to model weights')
-    parser.add_argument('--find_batch_size', default=False, help='Find the maximum batch size before training')
-    parser.add_argument('--wandb', action='store_true', default=False, help='Use wandb or not')
-    parser.add_argument('--wandb_name', type=str, default='efficientnetv2_L', help='wandb experiment name')
-    parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default= 256//2, help='Batch size for training')
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description='EfficientNetV2 Training')
+    
+    # Model arguments
+    parser.add_argument('--model', type=str, default='efficientnetv2_l', choices=['efficientnetv2_s', 'efficientnetv2_l'], help='Model type')
+    parser.add_argument('--pretrained', action='store_true', help='Use pretrained weights')
+    parser.add_argument('--weight_path', type=str, default='checkpoints/best_model.pth', help='Path to model weights')
 
-    args.wandb = True
+    # Data arguments
+    parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/sunglass/refining_yaw_yaw', help='Directory for "wear" images')
+    parser.add_argument('--nowear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/earing/refining_yaw_yaw', help='Directory for "no wear" images')
+    parser.add_argument('--nowear_plus_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/glasses/refining_yaw_yaw', help='Directory for additional "no wear" images')
+    parser.add_argument('--extra_wear_dir', type=str, default='/home/ubuntu/KOR_DATA/sunglass_dataset/wear/wear_data2', help='Directory for extra "wear" images')
+    parser.add_argument('--extra_nowear_dir', type=str, default='/home/ubuntu/KOR_DATA/sunglass_dataset/nowear/no_wear_data2', help='Directory for extra "no wear" images')
+    parser.add_argument('--extra_data_fraction', type=float, default=0.25, help='Fraction of extra data to use')
+
+    # Training arguments
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training')
+    parser.add_argument('--find_batch_size', action='store_true', help='Find the maximum batch size before training')
+    parser.add_argument('--no_confirm', action='store_true', help='Skip argument confirmation prompt')
+
+    # W&B arguments
+    parser.add_argument('--wandb', action='store_true', help='Use wandb or not')
+    parser.add_argument('--wandb_name', type=str, default='efficientnetv2_experiment', help='wandb experiment name')
+    
+    args = parser.parse_args()
 
     if args.find_batch_size:
         print("Finding max batch size...")
-        temp_model = EfficientNetV2_S()
+        temp_model = get_model(args.model)
         max_bs = find_max_batch_size(temp_model, input_shape=(3, 320, 320), device='cuda:0')
         if max_bs:
-            print(f"Maximum possible batch size is {max_bs}. You can set --batch_size {max_bs} for the next run.")
-            max_bs = max_bs 
+            print(f"Maximum possible batch size is {max_bs}. Setting batch_size to this value.")
             args.batch_size = max_bs
 
+    print("--- Training Arguments ---")
     for var in vars(args):
-        print(f"{var} : {getattr(args, var)}")
-    input("Please check the arguments. If you want to proceed, press Enter...")
+        print(f"{var}: {getattr(args, var)}")
+    print("--------------------------")
+    
+    if not args.no_confirm:
+        input("Press Enter to proceed...")
     
     world_size = torch.cuda.device_count()
     if world_size > 1:

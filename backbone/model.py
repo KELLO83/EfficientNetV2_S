@@ -1,5 +1,7 @@
 import timm
 import torch
+import torch.nn as nn
+from torch.autograd import Function
 
 class EfficientNetV2_S(torch.nn.Module):
     def __init__(self):
@@ -49,7 +51,7 @@ class EfficientNetV2_L(torch.nn.Module):
         super(EfficientNetV2_L, self).__init__()
         self.model = timm.create_model('tf_efficientnetv2_l.in21k_ft_in1k', pretrained=True , num_classes=2)
         
-        for param in model.parameters():
+        for param in self.model.parameters():
             param.requires_grad = False
 
         for param in self.model.blocks[6][6].parameters() :
@@ -83,6 +85,71 @@ class EfficientNetV2_L(torch.nn.Module):
         x = self.model(x)
         return x
 
+# --- Domain-Adversarial Training Components ---
+
+class GradientReversalFunction(Function):
+    """
+    Gradient Reversal Layer from:
+    Unsupervised Domain Adaptation by Backpropagation (Ganin & Lempitsky, 2015)
+    """
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        output = grad_output.neg() * ctx.alpha
+        return output, None
+
+class EfficientNetV2_S_DANN(nn.Module):
+    """
+    Domain-Adversarial Neural Network (DANN) implementation for EfficientNetV2-S.
+    """
+    def __init__(self, num_classes=2, num_domains=2):
+        super(EfficientNetV2_S_DANN, self).__init__()
+        
+        # --- Feature Extractor ---
+        self.feature_extractor = timm.create_model(
+            'tf_efficientnetv2_s.in21k', 
+            pretrained=True, 
+            num_classes=0  # Setting num_classes=0 returns the feature extractor
+        )
+        num_features = self.feature_extractor.num_features
+
+        # --- Label Predictor ---
+        self.label_predictor = nn.Linear(num_features, num_classes)
+
+        # --- Domain Classifier ---
+        self.domain_classifier = nn.Sequential(
+            nn.Linear(num_features, 512),
+            nn.ReLU(True),
+            nn.Dropout(),
+            nn.Linear(512, num_domains)
+        )
+        
+        self.grl = GradientReversalFunction.apply
+
+    def forward(self, x, alpha=1.0):
+        """
+        Forward pass for the DANN model.
+        
+        Args:
+            x (torch.Tensor): Input tensor.
+            alpha (float): The hyperparameter to trade off the domain loss.
+        
+        Returns:
+            tuple: A tuple containing (label_output, domain_output).
+        """
+        features = self.feature_extractor(x)
+        label_output = self.label_predictor(features)
+        
+        reversed_features = self.grl(features, alpha)
+        domain_output = self.domain_classifier(reversed_features)
+        
+        return label_output, domain_output
+
+
 if __name__ == "__main__":
     model = EfficientNetV2_S()
     print(model)
@@ -103,4 +170,3 @@ if __name__ == "__main__":
         row_settings=["depth"],
         mode='eval'
     )
-
