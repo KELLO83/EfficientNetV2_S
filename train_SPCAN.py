@@ -26,6 +26,12 @@ from natsort import natsorted
 import torchvision.transforms.v2 as v2
 from collections import OrderedDict
 
+
+"""
+Self-Paced Collaborative and Adversarial Network for Unsupervised Domain Adaptation
+https://arxiv.org/abs/2506.19267
+"""
+
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 def setup_ddp(rank, world_size):

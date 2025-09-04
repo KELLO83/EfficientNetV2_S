@@ -26,6 +26,12 @@ from natsort import natsorted
 import torchvision.transforms.v2 as v2
 from collections import OrderedDict
 
+"""
+Domain-Adversarial Training of Neural Networks
+https://arxiv.org/abs/1505.07818
+"""
+
+
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 def find_max_batch_size(model, input_shape, device):

@@ -27,6 +27,14 @@ from torchvision.transforms import v2
 from dataset import SPMLDataset
 from utils.smpl_loss import GR_loss # Updated import for GR_loss
 
+
+
+"""
+Boosting Single Positive Multi-label Classification with Generalized Robust Loss
+https://arxiv.org/abs/2405.03501
+
+"""
+
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 def setup_ddp(rank, world_size):
@@ -109,15 +117,24 @@ def main_worker(rank, world_size, args):
         logging.info(f"Train samples: {len(train_paths)}")
         logging.info(f"Validation samples: {len(val_paths)}")
 
-    common_transform = v2.Compose([
+    train_transform = v2.Compose([
         v2.ToImage(),
         v2.ToDtype(torch.float32, scale=True),
-        v2.Resize(size=(640, 640), antialias=True),
+        v2.Resize((640, 640)), 
+        v2.TrivialAugmentWide(), 
         v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        v2.RandomErasing(p=0.3, scale=(0.02, 0.15) , value=0), 
+     ])
+    
+
+    val_transform = v2.Compose([
+        v2.ToImage(), v2.ToDtype(torch.float32, scale=True),
+        v2.Resize((640, 640)),
+        v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    train_dataset = SPMLDataset(file_paths=train_paths, labels=train_labels, transform=common_transform)
-    val_dataset = SPMLDataset(file_paths=val_paths, labels=val_labels, transform=common_transform)
+    train_dataset = SPMLDataset(file_paths=train_paths, labels=train_labels, transform=train_transform)
+    val_dataset = SPMLDataset(file_paths=val_paths, labels=val_labels, transform=val_transform)
 
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank) if world_size > 1 else None
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
