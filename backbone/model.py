@@ -151,8 +151,8 @@ class EfficientNetV2_S_DANN(nn.Module):
 
 
 if __name__ == "__main__":
-    model = EfficientNetV2_S()
-    print(model)
+    # model = EfficientNetV2_S()
+    # print(model)
     # print("========================================")
 
     # print("\n--- Final requires_grad status outside __init__ ---")
@@ -160,11 +160,13 @@ if __name__ == "__main__":
     #     print(f"name : {name} , requires_grad : {param.requires_grad}")
 
 
+    dann_model = EfficientNetV2_S_DANN()
+    print(dann_model)
     import torchinfo
 
     torchinfo.summary(
-        model=model,
-        input_size=(1, 3, 320, 320),
+        model=dann_model,
+        input_size=(1, 3, 640, 640),
         verbose=True,
         col_names=["input_size", "output_size", "trainable"],
         row_settings=["depth"],
