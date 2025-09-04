@@ -102,6 +102,9 @@ class GradientReversalFunction(Function):
         output = grad_output.neg() * ctx.alpha
         return output, None
 
+"""
+adversarial domain adaptation model
+"""
 class EfficientNetV2_S_DANN(nn.Module):
     """
     Domain-Adversarial Neural Network (DANN) implementation for EfficientNetV2-S.
@@ -120,6 +123,12 @@ class EfficientNetV2_S_DANN(nn.Module):
         # --- Label Predictor ---
         self.label_predictor = nn.Linear(num_features, num_classes)
 
+        for name , param in self.feature_extractor.named_parameters():
+            if name.startswith('classifier') or name.startswith('conv_head') or name.startswith('bn2') or name.startswith('blocks.5.14') :
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
+        
         # --- Domain Classifier ---
         self.domain_classifier = nn.Sequential(
             nn.Linear(num_features, 512),
@@ -129,6 +138,9 @@ class EfficientNetV2_S_DANN(nn.Module):
         )
         
         self.grl = GradientReversalFunction.apply
+
+        for name , param in self.domain_classifier.named_parameters():
+            param.requires_grad = True
 
     def forward(self, x, alpha=1.0):
         """
@@ -148,6 +160,27 @@ class EfficientNetV2_S_DANN(nn.Module):
         domain_output = self.domain_classifier(reversed_features)
         
         return label_output, domain_output
+    
+
+class GradientReversalFunction(Function):
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        output = grad_output.neg() * ctx.alpha
+        return output, None
+
+class GradientReversalLayer(nn.Module):
+    def __init__(self, alpha=1.0):
+        super(GradientReversalLayer, self).__init__()
+        self.alpha = alpha
+
+    def forward(self, x):
+        return GradientReversalFunction.apply(x, self.alpha)
+
 
 
 if __name__ == "__main__":
@@ -160,15 +193,22 @@ if __name__ == "__main__":
     #     print(f"name : {name} , requires_grad : {param.requires_grad}")
 
 
-    dann_model = EfficientNetV2_S_DANN()
-    print(dann_model)
+    model = EfficientNetV2_S_DANN()
+    print(model)
     import torchinfo
 
     torchinfo.summary(
-        model=dann_model,
+        model=model,
         input_size=(1, 3, 640, 640),
         verbose=True,
         col_names=["input_size", "output_size", "trainable"],
         row_settings=["depth"],
         mode='eval'
     )
+
+    backbone_params = sum(p.numel() for p in model.parameters())
+    trainable_backbone_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model total params: {backbone_params:,}")
+    print(f"Model trainable params: {trainable_backbone_params:,}")
+    print(f"traineable params percentage: {100 * trainable_backbone_params / backbone_params:.2f}%")
+    print('==' * 30)
