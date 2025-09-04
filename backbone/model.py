@@ -112,6 +112,7 @@ class EfficientNetV2_S_DANN(nn.Module):
     def __init__(self, num_classes=2, num_domains=2):
         super(EfficientNetV2_S_DANN, self).__init__()
         
+        
         # --- Feature Extractor ---
         self.feature_extractor = timm.create_model(
             'tf_efficientnetv2_s.in21k', 
@@ -162,24 +163,24 @@ class EfficientNetV2_S_DANN(nn.Module):
         return label_output, domain_output
     
 
-class GradientReversalFunction(Function):
-    @staticmethod
-    def forward(ctx, x, alpha):
-        ctx.alpha = alpha
-        return x.view_as(x)
+# class GradientReversalFunction(Function):
+#     @staticmethod
+#     def forward(ctx, x, alpha):
+#         ctx.alpha = alpha
+#         return x.view_as(x)
 
-    @staticmethod
-    def backward(ctx, grad_output):
-        output = grad_output.neg() * ctx.alpha
-        return output, None
+#     @staticmethod
+#     def backward(ctx, grad_output):
+#         output = grad_output.neg() * ctx.alpha
+#         return output, None
 
-class GradientReversalLayer(nn.Module):
-    def __init__(self, alpha=1.0):
-        super(GradientReversalLayer, self).__init__()
-        self.alpha = alpha
+# class GradientReversalLayer(nn.Module):
+#     def __init__(self, alpha=1.0):
+#         super(GradientReversalLayer, self).__init__()
+#         self.alpha = alpha
 
-    def forward(self, x):
-        return GradientReversalFunction.apply(x, self.alpha)
+#     def forward(self, x):
+#         return GradientReversalFunction.apply(x, self.alpha)
 
 
 

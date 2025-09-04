@@ -1,5 +1,5 @@
 import torch
-from backbone.model import EfficientNetV2_S
+from backbone.model import EfficientNetV2_S , EfficientNetV2_S_DANN
 import pathlib
 import natsort
 import torchvision.transforms.v2 as v2
@@ -8,6 +8,8 @@ import os
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
+from collections import OrderedDict
+
 class SunglassDataset(Dataset):
     """
     Custom Dataset for sunglass wear/no-wear classification.
@@ -35,19 +37,49 @@ class SunglassDataset(Dataset):
             
         return image, label
 
-weight_path = 'checkpoints/best_model.pth'
-weight = torch.load(weight_path)
+weight_path = 'checkpoints/efficientnetv2_s_dann_best.pth'
+# Load weights onto the CPU to avoid GPU memory issues
+weight = torch.load(weight_path, map_location='cpu')
 
-if hasattr(weight, 'model_state_dict'):
-    model_weight = weight['model_state_dict']
+if hasattr(weight, 'state_dict'):
+    weight = weight.state_dict()
 else:
-    model_weight = weight
+    weight = weight
 
-model = EfficientNetV2_S()
-result = model.load_state_dict(model_weight)
-print("Missing keys:", result.missing_keys)
-print("Unexpected keys:", result.unexpected_keys)
-print(f"{result}")
+print("--- Keys from loaded weights ---")
+for k in weight.keys():
+    print(k)
+print("---------------------------------")
+
+# The model was compiled, so we need to remove the '_orig_od.' prefix
+new_state_dict = OrderedDict()
+for k, v in weight.items():
+    if k.startswith('_orig_mod'):
+        name = k.replace('_orig_mod.', '')
+        new_state_dict[name] = v
+    else:
+        new_state_dict[k] = v
+
+print("--- Keys after cleaning ---")
+for k in new_state_dict.keys():
+    print(k)
+
+
+model = EfficientNetV2_S_DANN(num_classes=2, num_domains=2)
+# Load the cleaned state dict
+result = model.load_state_dict(new_state_dict, strict=True)
+
+print("--- Loading Model Weights ---")
+print(f"Loading from: {weight_path}")
+if result.missing_keys:
+    print("Missing keys:", result.missing_keys)
+if result.unexpected_keys:
+    print("Unexpected keys:", result.unexpected_keys)
+
+if not result.missing_keys and not result.unexpected_keys:
+    print("Weights loaded successfully!")
+else:
+    print("Weights loaded with some mismatches.")
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
 model.eval()
@@ -55,15 +87,17 @@ model.eval()
 transform = v2.Compose([
     v2.ToImage(),
     v2.ToDtype(torch.float32, scale=True),
-    v2.Resize(size=(320, 320), antialias=True),
+    v2.Resize(size=(320 * 2, 320 * 2), antialias=True),
     v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
-# wear_path = pathlib.Path('/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/sunglass/refining_Yaw')
-# nowear_path = pathlib.Path('/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/earing/refining_Yaw')
 
-wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/wear/wear_sunglass_korean')
-no_wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/nowear/no_wear_sunglass_korean')
+
+wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/wear')
+no_wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/nowear')
+
+# no_wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/nowear')
+# no_wear = pathlib.Path('elfin_data')
 
 wear_files = natsort.natsorted(list(wear.glob('**/*.jpg')))
 nowear_files = natsort.natsorted(list(no_wear.glob('**/*.jpg')))
@@ -74,32 +108,54 @@ print(f"Found {len(nowear_files)} images without sunglasses (negative class, lab
 if not wear_files or not nowear_files:
     print(len(wear_files), len(nowear_files))
     raise ValueError("No image files found in the specified directories.")
+
+# wear_files = []
+
 full_dataset = SunglassDataset(wear_files=wear_files, nowear_files=nowear_files, transform=transform)
-data_loader = DataLoader(full_dataset, batch_size=16, shuffle=False, num_workers=4)
+data_loader = DataLoader(full_dataset, batch_size= 64, shuffle=False, num_workers=os.cpu_count(), pin_memory=True)
 
 tp, tn, fp, fn = 0, 0, 0, 0
 
+# Lists to store results for analysis
+all_labels = []
+all_preds = []
+all_similarities = []
+
+model.eval()
 with torch.no_grad():
-    all_labels = []
-    all_preds = []
     for images, labels in tqdm(data_loader, desc="Evaluating"):
         images = images.to(device)
         labels = labels.to(device)
-        outputs = model(images)
-        predicted = torch.argmax(outputs, dim=1)
-        all_labels.extend(labels.cpu().numpy())
+        
+        # DANN model returns (label_output, domain_output)
+        # For inference, we only need the label_output and set alpha=0
+        label_outputs, _ = model(images, alpha=0)
+        
+        # --- 1. Get Predictions ---
+        predicted = torch.argmax(label_outputs, dim=1)
         all_preds.extend(predicted.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
 
-    tp = np.sum((np.array(all_preds) == 1) & (np.array(all_labels) == 1))
-    tn = np.sum((np.array(all_preds) == 0) & (np.array(all_labels) == 0))
-    fp = np.sum((np.array(all_preds) == 1) & (np.array(all_labels) == 0))
-    fn = np.sum((np.array(all_preds) == 0) & (np.array(all_labels) == 1))
+        # --- 2. Get Similarities (Probabilities for the positive class) ---
+        # Apply softmax to convert logits to probabilities
+        probabilities = torch.softmax(label_outputs, dim=1)
+        # The similarity is the probability of the 'wear' class (class 1)
+        similarities = probabilities[:, 1]
+        all_similarities.extend(similarities.cpu().numpy())
 
+# Convert lists to numpy arrays for easier analysis
+all_labels = np.array(all_labels)
+all_preds = np.array(all_preds)
+all_similarities = np.array(all_similarities)
 
-
+# --- Calculate Metrics ---
+tp = np.sum((all_preds == 1) & (all_labels == 1))
+tn = np.sum((all_preds == 0) & (all_labels == 0))
+fp = np.sum((all_preds == 1) & (all_labels == 0))
+fn = np.sum((all_preds == 0) & (all_labels == 1))
 
 total = len(full_dataset)
-print("\n--- Evaluation Complete ---")
+print("--- Evaluation Complete ---")
 print(f"Total Images: {total}")
 print(f"True Positives (TP): {tp}")
 print(f"True Negatives (TN): {tn}")
@@ -116,28 +172,53 @@ print(f"Precision: {precision:.4f}")
 print(f"Recall (Sensitivity): {recall:.4f}")
 print(f"F1-Score: {f1_score:.4f}")
 
-import numpy as np
+# --- Plotting ---
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
+import itertools
 
+# 1. Confusion Matrix
 cm = confusion_matrix(all_labels, all_preds)
-plt.figure(figsize=(5, 4))
-cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-im = plt.imshow(cm_normalized, interpolation='nearest', cmap=plt.cm.Blues)
+# Handle potential division by zero if a class has no samples
+cm_sum = cm.sum(axis=1)[:, np.newaxis]
+with np.errstate(divide='ignore', invalid='ignore'):
+    cm_normalized = np.where(cm_sum > 0, cm.astype('float') / cm_sum, 0)
+
+plt.figure(figsize=(15, 15))
+plt.imshow(cm_normalized, interpolation='nearest', cmap=plt.cm.Blues, vmin=0, vmax=1)
 plt.title('Normalized Confusion Matrix')
-plt.colorbar(im)
-plt.xlabel('Predicted label')
-plt.ylabel('True label')
+plt.colorbar()
 
+tick_marks = np.arange(2)
+plt.xticks(tick_marks, ['No-Wear', 'Wear'])
+plt.yticks(tick_marks, ['No-Wear', 'Wear'])
 
-labels = np.array([['TN', 'FP'], ['FN', 'TP']])
-for i in range(cm.shape[0]):
-    for j in range(cm.shape[1]):
-        text = f"{labels[i, j]}\n{cm[i, j]}"
-        plt.text(j, i, text, ha="center", va="center", color="red", fontsize=12)
+# Add text annotations
+thresh = cm_normalized.max() / 2.
+for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+    plt.text(j, i, f'{cm[i, j]}\n({cm_normalized[i, j]:.2%})',
+             horizontalalignment="center",
+             color="white" if cm_normalized[i, j] > thresh else "black")
 
-plt.xticks([0, 1], ['No-Wear', 'Wear'])
-plt.yticks([0, 1], ['No-Wear', 'Wear'])
 plt.tight_layout()
-plt.savefig('confusion_matrix_annotated.png')
+plt.ylabel('True label')
+plt.xlabel('Predicted label')
+plt.savefig('confusion_matrix_annotated.png', bbox_inches='tight')
+plt.show()
+
+
+# 2. Similarity Distribution Plot
+pos_similarities = all_similarities[all_labels == 1]
+neg_similarities = all_similarities[all_labels == 0]
+
+plt.figure(figsize=(10, 6))
+plt.hist(neg_similarities, bins=50, alpha=0.7, label='Negative (No-Wear) Similarities', color='blue', density=True)
+plt.hist(pos_similarities, bins=50, alpha=0.7, label='Positive (Wear) Similarities', color='red', density=True)
+
+plt.title('Distribution of Similarity Scores')
+plt.xlabel('Similarity Score (Probability of "Wear" class)')
+plt.ylabel('Density')
+plt.legend()
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.savefig('similarity_distribution.png')
 plt.show()

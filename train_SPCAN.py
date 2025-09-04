@@ -28,11 +28,6 @@ from collections import OrderedDict
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
-def find_max_batch_size(model, input_shape, device):
-    if 'cuda' not in str(device):
-        logging.info("CUDA not found. Skipping max batch size search.")
-        return None
-
 def setup_ddp(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
@@ -43,7 +38,7 @@ def cleanup_ddp():
 
 def wandb_init(name='None'):
     wandb.init(
-        project='EfficientNetV2_DANN',
+        project='EfficientNetV2_SPCAN', # Project name updated for SPCAN
         name=name,
     )
 
@@ -85,7 +80,7 @@ def main_worker(rank, world_size, args):
     torch.backends.cudnn.benchmark = True
     device = torch.device(f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
 
-    # --- Data Loading for DANN ---
+    # --- Data Loading for DANN/SPCAN ---
     domain_A_wear = list(pathlib.Path(args.wear_dir).glob('**/*.jpg'))
     domain_A_nowear = list(pathlib.Path(args.nowear_dir).glob('**/*.jpg')) + \
                       list(pathlib.Path(args.nowear_plus_dir).glob('**/*.jpg'))
@@ -115,25 +110,14 @@ def main_worker(rank, world_size, args):
     val_B_wear = [p for p, d in zip(val_paths, val_labels_with_domain) if d[1] == 1 and d[2] == 1]
     val_B_nowear = [p for p, d in zip(val_paths, val_labels_with_domain) if d[1] == 0 and d[2] == 1]
 
-    # train_transform  = v2.Compose([
-    #         v2.ToImage(),
-    #         v2.ToDtype(torch.float32 ,scale=True),
-    #         v2.RandomHorizontalFlip(p=0.3),
-    #         v2.RandomApply([v2.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1)], p=0.25),
-    #         v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 1.5))], p=0.25),
-    #         v2.Resize(size=(320, 320)),
-    #         v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    #     ])
-
     train_transform = v2.Compose([
         v2.ToImage(),
         v2.ToDtype(torch.float32, scale=True),
         v2.Resize((640, 640)), 
         v2.TrivialAugmentWide(), 
         v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        v2.RandomErasing(p=0.3, scale=(0.02, 0.15) , value=0), 
+        v2.RandomErasing(p=0.5, scale=(0.02, 0.05) , value=0), 
      ])
-
 
     val_transform = v2.Compose([
         v2.ToImage(), v2.ToDtype(torch.float32, scale=True),
@@ -155,14 +139,10 @@ def main_worker(rank, world_size, args):
     # --- Sampler and DataLoader Setup ---
     if world_size > 1:
         train_sampler = DistributedDomainBalancedSampler(
-            train_dataset,
-            num_replicas=world_size,
-            rank=rank,
-            batch_size=args.batch_size,
-            domain_B_fraction=args.domain_b_fraction
+            train_dataset, num_replicas=world_size, rank=rank,
+            batch_size=args.batch_size, domain_B_fraction=args.domain_b_fraction
         )
         val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
-
     else:
         train_sampler = DomainBalancedSampler(train_dataset, batch_size=args.batch_size, domain_B_fraction=args.domain_b_fraction)
         val_sampler = None
@@ -170,7 +150,7 @@ def main_worker(rank, world_size, args):
     trainloader = data.DataLoader(train_dataset, batch_size=args.batch_size, pin_memory=True, num_workers=os.cpu_count()//world_size, sampler=train_sampler, shuffle=False)
     valloader = data.DataLoader(val_dataset, batch_size=args.batch_size, pin_memory=True, num_workers=os.cpu_count()//world_size, sampler=val_sampler, shuffle=False)
 
-    # --- Loss Functions for DANN ---
+    # --- Loss Functions for DANN/SPCAN ---
     count_no_wear = len(train_A_nowear) + len(train_B_nowear)
     count_wear = len(train_A_wear) + len(train_B_wear)
     if count_no_wear > 0 and count_wear > 0:
@@ -179,13 +159,13 @@ def main_worker(rank, world_size, args):
         class_weights = torch.tensor([weight_for_class_0, weight_for_class_1], device=device)
     else:
         class_weights = None
+    
     criterion_label = torch.nn.CrossEntropyLoss(weight=class_weights)
-    criterion_domain = torch.nn.CrossEntropyLoss()
+    # For SPCAN, we need per-sample loss, so set reduction='none'
+    criterion_domain = torch.nn.CrossEntropyLoss(reduction='none' if args.spcan else 'mean')
 
     model = get_model(args.model).to(device)
-    
-    if args.compile and hasattr(torch, 'compile'):
-        model = torch.compile(model)
+    model = torch.compile(model)
 
     if world_size > 1:
         model = DDP(model, device_ids=[rank])
@@ -203,7 +183,6 @@ def main_worker(rank, world_size, args):
         logging.info('==' * 30)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
-    #scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scheduler = PolynomialLRWarmup(
         optimizer, warmup_iters=10, total_iters=args.epochs, power=1.0 , limit_lr = 1e-5
     )
@@ -212,13 +191,18 @@ def main_worker(rank, world_size, args):
     scaler = torch.amp.GradScaler()
     best_val_acc = 0.0
 
-    # --- Training Loop for DANN ---
+    # --- Training Loop for DANN/SPCAN ---
     for epoch in range(args.epochs):
         if world_size > 1: train_sampler.set_epoch(epoch)
         model.train()
         total_loss, label_loss_sum, domain_loss_sum = 0, 0, 0
         correct_train, total_train = 0, 0
         len_dataloader = len(trainloader)
+        
+        # SPCAN: Calculate gamma for the current epoch
+        gamma = 0.0
+        if args.spcan:
+            gamma = args.spcan_gamma_init + (args.spcan_gamma_end - args.spcan_gamma_init) * (epoch / (args.epochs -1))
 
         pbar_train = tqdm(enumerate(trainloader), total=len_dataloader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]", disable=(rank != 0))
         for i, (images, class_labels, domain_labels) in pbar_train:
@@ -231,7 +215,23 @@ def main_worker(rank, world_size, args):
             with torch.amp.autocast(device_type=device.type):
                 label_output, domain_output = model(images, alpha=alpha)
                 loss_l = criterion_label(label_output, class_labels)
-                loss_d = criterion_domain(domain_output, domain_labels)
+
+                # --- SPCAN/DANN Domain Loss Calculation ---
+                if args.spcan:
+                    # 1. Calculate per-sample domain loss
+                    domain_loss_per_sample = criterion_domain(domain_output, domain_labels)
+                    
+                    # 2. Calculate self-paced weights
+                    # .detach() is used to prevent gradients from flowing through this weight calculation
+                    weights = torch.exp(-gamma * domain_loss_per_sample.detach())
+                    
+                    # 3. Apply weights to get the final domain loss
+                    loss_d = torch.mean(weights * domain_loss_per_sample)
+                else:
+                    # Standard DANN loss
+                    loss_d = criterion_domain(domain_output, domain_labels)
+                # --- End of SPCAN/DANN Block ---
+
                 loss = loss_l + (args.domain_lambda * loss_d)
 
             scaler.scale(loss).backward()
@@ -271,16 +271,24 @@ def main_worker(rank, world_size, args):
         val_accuracy = 100 * correct_val / total_val
         
         if rank == 0 and args.wandb:
-            wandb.log({
+            log_data = {
                "Train Total Loss": total_loss / len_dataloader,
                "Train Label Loss": label_loss_sum / len_dataloader,
                "Train Domain Loss": domain_loss_sum / len_dataloader,
                "Train Accuracy": train_accuracy,
                "Val Loss": val_loss / len(valloader),
                "Val Accuracy": val_accuracy,
-               "Learning Rate": scheduler.get_last_lr()[0]
-            })
+               "Learning Rate": scheduler.get_last_lr()[0],
+               "DANN Alpha": alpha
+            }
+            if args.spcan:
+                log_data["SPCAN Gamma"] = gamma
+                # We can also log the mean of weights to see how it changes
+                # This requires re-calculating weights for one batch or storing them
+                # For simplicity, we log gamma here.
 
+            wandb.log(log_data)
+            
         if rank == 0:
             logging.info(f"Epoch {epoch+1}, Train Loss: {total_loss/len_dataloader:.4f}, Train Acc: {train_accuracy:.2f}%, Val Loss: {val_loss/len(valloader):.4f}, Val Acc: {val_accuracy:.2f}%")
 
@@ -320,13 +328,17 @@ def main_worker(rank, world_size, args):
     if world_size > 1: cleanup_ddp()
 
 def main():
-    parser = argparse.ArgumentParser(description='DANN Training for EfficientNetV2')
+    parser = argparse.ArgumentParser(description='SPCAN/DANN Training for EfficientNetV2')
     
     # Model arguments
     parser.add_argument('--model', type=str, default='efficientnetv2_s_dann', choices=['efficientnetv2_s_dann'], help='Model type')
-    parser.add_argument('--domain_lambda', type=float, default=1.0, help='Weight for the domain loss in DANN')
-    parser.add_argument('--domain_b_fraction', type=float, default=0.2, help='Fraction of domain B data in each batch for balanced sampling.')
-    parser.add_argument('--compile', action='store_true', help='Use torch.compile for model optimization')
+    parser.add_argument('--domain_lambda', type=float, default=1.0, help='Weight for the domain loss in DANN/SPCAN')
+    parser.add_argument('--domain_b_fraction', type=float, default=0.3, help='Fraction of domain B data in each batch for balanced sampling.')
+
+    # --- SPCAN Arguments ---
+    parser.add_argument('--spcan', default=True, help='Use SPCAN instead of standard DANN')
+    parser.add_argument('--spcan_gamma_init', type=float, default=0.5, help='Initial gamma for SPCAN scheduler')
+    parser.add_argument('--spcan_gamma_end', type=float, default=5.0, help='Final gamma for SPCAN scheduler')
 
     # Data arguments
     parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/sunglass/refining_yaw_yaw', help='Directory for "wear" images in Domain A')
@@ -338,15 +350,14 @@ def main():
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=64 , help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
     parser.add_argument('--no_confirm', action='store_true', help='Skip argument confirmation prompt')
 
     # W&B arguments
     parser.add_argument('--wandb', action='store_true', help='Use wandb or not')
-    parser.add_argument('--wandb_name', type=str, default='dann_experiment', help='wandb experiment name')
+    parser.add_argument('--wandb_name', type=str, default='spcan_experiment', help='wandb experiment name')
     
     args = parser.parse_args()
-
 
     print("---" + "-" * 17 + " Training Arguments " + "-" * 17 + " ---")
     for var in vars(args):
