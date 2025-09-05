@@ -23,6 +23,7 @@ import torch.multiprocessing as mp
 from natsort import natsorted
 from torchvision.transforms import v2
 import fnmatch
+from collections import OrderedDict
 
 # Import the new SPMLDataset and loss functions
 from dataset import SPMLDataset
@@ -76,7 +77,7 @@ def main_worker(rank, world_size, args):
     device = torch.device(f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
 
     # --- Data Loading for SPMLDataset ---
-    num_classes = 4
+    num_classes = 4 
 
     all_file_paths = []
     all_labels = []
@@ -88,7 +89,7 @@ def main_worker(rank, world_size, args):
         class_definitions = {
             0: ['neckslice', 'glasses'],  # Normal Person
             1: ['hat'],                   # Hat Person
-            2: ['sunglasses'],            # Sunglass Person
+            2: ['sunglass'],            # sunglass Person
             3: ['mask']                   # Mask Person
         }
         
@@ -132,6 +133,21 @@ def main_worker(rank, world_size, args):
                 hat_files_to_add.extend([str(p) for p in hat_subdir.glob('**/*.jpg')])
             
             class_files[1].extend(hat_files_to_add)
+
+        if args.plus_sunglass_data_path and os.path.isdir(args.plus_sunglass_data_path):
+            base_sunglass_path = pathlib.Path(args.plus_sunglass_data_path)
+            
+            all_subdirs = [d for d in base_sunglass_path.iterdir() if d.is_dir()]
+            sorted_subdirs = natsorted(all_subdirs)
+            
+            slice_index = int(args.fraction_sunglass * len(sorted_subdirs))
+            selected_dirs = sorted_subdirs[:slice_index]
+
+            sunglass_files_to_add = []
+            for sunglass_subdir in selected_dirs:
+                sunglass_files_to_add.extend([str(p) for p in sunglass_subdir.glob('**/*.jpg')])
+            
+            class_files[2].extend(sunglass_files_to_add)
 
         # Log counts after filtering
         if rank == 0:
@@ -281,18 +297,36 @@ def main_worker(rank, world_size, args):
         if rank == 0:
             logging.info(f"Epoch {epoch+1}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
 
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
+
+            if (epoch + 1) % 2 == 0 :
+                state_to_save = model.module.state_dict() if world_size > 1 else model.state_dict()
+                
+                cleaned_state_dict = OrderedDict()
+                for k, v in state_to_save.items():
+                    if '_orig_mod.' in k:
+                        name = k.replace('_orig_mod.', '')
+                    else:
+                        name = k
+                    cleaned_state_dict[name] = v
+                
+                torch.save(cleaned_state_dict, os.path.join('checkpoints' , f'{args.model}_{epoch+1}.pth'))
+                logging.info(f"Saved checkpoint at epoch {epoch+1}.")
+
+            if avg_val_loss > best_val_acc:
+                best_val_acc = avg_val_loss
+                state_to_save = model.module.state_dict() if world_size > 1 else model.state_dict()
+                
+                cleaned_state_dict = OrderedDict()
+                for k, v in state_to_save.items():
+                    if '_orig_mod' in k:
+                        name = k.replace('_orig_mod.', '')
+                    else:
+                        name = k
+                    cleaned_state_dict[name] = v
+                
                 os.makedirs('checkpoints', exist_ok=True)
-                checkpoint = {
-                    'epoch': epoch,
-                    'model_state_dict': model.module.state_dict() if world_size > 1 else model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'best_val_loss': best_val_loss
-                }
-                torch.save(checkpoint, os.path.join('checkpoints', 'best_spml_model.pth'))
-                logging.info("Saved best SPML model and optimizer state.")
+                torch.save(cleaned_state_dict, os.path.join('checkpoints', f'{args.model}_best.pth'))
+                logging.info("Saved best model state.")
 
             early_stopping(avg_val_loss)
 
@@ -316,7 +350,7 @@ def main():
     parser = argparse.ArgumentParser(description='EfficientNetV2 SPML Training with Generalized Robust Loss')
 
     # Model arguments
-    parser.add_argument('--model', type=str, default='efficientnetv2_l', choices=['efficientnetv2_s', 'efficientnetv2_l'], help='Model type')
+    parser.add_argument('--model', type=str, default='efficientnetv2_s', choices=['efficientnetv2_s', 'efficientnetv2_l'], help='Model type')
     parser.add_argument('--pretrained', action='store_true', help='Use pretrained weights')
     parser.add_argument('--weight_path', type=str, default='checkpoints/best_spml_model.pth', help='Path to model weights')
     parser.add_argument('--compile', action='store_true', help='Use torch.compile for model optimization')
@@ -327,11 +361,15 @@ def main():
 
     # Hat plus data arguments
     parser.add_argument('--plus_hat_data_path', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_hat_wear', help='Path to additional hat data (optional)')
-    parser.add_argument('--fraction_hat', type=float, default=0.25, help='Fraction of additional hat data to use (0-1)')
+    parser.add_argument('--fraction_hat', type=float, default=0.1, help='Fraction of additional hat data to use (0-1)')
+
+    # Sunglass plus data arguments
+    parser.add_argument('-plus_sunglass_data_path', type=str, default=None, help='Path to additional sunglass data (optional)')
+    parser.add_argument('--fraction_sunglass', type=float, default=0.25, help='Fraction of additional sunglass data to use (0-1)')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for training')
     parser.add_argument('--no_confirm', action='store_true', help='Skip argument confirmation prompt')
 
     # GR_loss arguments

@@ -4,9 +4,9 @@ import torch.nn as nn
 from torch.autograd import Function
 
 class EfficientNetV2_S(torch.nn.Module):
-    def __init__(self):
+    def __init__(self , num_classes = 2):
         super(EfficientNetV2_S, self).__init__()
-        self.model = timm.create_model('tf_efficientnetv2_s.in21k', pretrained=True , num_classes=2)
+        self.model = timm.create_model('tf_efficientnetv2_s.in21k', pretrained=True , num_classes=num_classes)
         
         # print("--- All parameter names inside __init__ ---")
         # for name, param in self.model.named_parameters():
@@ -34,11 +34,11 @@ class EfficientNetV2_S(torch.nn.Module):
         #     else:
         #         param.requires_grad = False
         
-        print("--- Checking requires_grad status inside __init__ ---")
-        for name, param in self.model.named_parameters():
-            # if name.startswith('blocks.5'):
-            print(f"name: {name}, requires_grad: {param.requires_grad}")
-        print("----------------------------------------------------")
+        # print("--- Checking requires_grad status inside __init__ ---")
+        # for name, param in self.model.named_parameters():
+        #     # if name.startswith('blocks.5'):
+        #     print(f"name: {name}, requires_grad: {param.requires_grad}")
+        # print("----------------------------------------------------")
     
 
     def forward(self, x):
@@ -47,9 +47,9 @@ class EfficientNetV2_S(torch.nn.Module):
     
 
 class EfficientNetV2_L(torch.nn.Module):
-    def __init__(self):
+    def __init__(self , num_classes = 2):
         super(EfficientNetV2_L, self).__init__()
-        self.model = timm.create_model('tf_efficientnetv2_l.in21k_ft_in1k', pretrained=True , num_classes=2)
+        self.model = timm.create_model('tf_efficientnetv2_l.in21k_ft_in1k', pretrained=True , num_classes= num_classes)
         
         for param in self.model.parameters():
             param.requires_grad = False
@@ -79,7 +79,15 @@ class EfficientNetV2_L(torch.nn.Module):
             total_params += param.numel()
             if param.requires_grad:
                 trainable_params += param.numel()
-        print(f"- {name} (Trainable)")
+                print(f"- {name} (Trainable)")
+
+
+        
+        # print("--- Checking requires_grad status inside __init__ ---")
+        # for name, param in self.model.named_parameters():
+        #     print(f"name: {name}, requires_grad: {param.requires_grad}")
+        # print("----------------------------------------------------")
+
 
     def forward(self, x):
         x = self.model(x)
@@ -194,8 +202,8 @@ if __name__ == "__main__":
     #     print(f"name : {name} , requires_grad : {param.requires_grad}")
 
 
-    model = EfficientNetV2_S_DANN()
-    print(model)
+    model = EfficientNetV2_L()
+    #print(model)
     import torchinfo
 
     torchinfo.summary(
