@@ -22,11 +22,12 @@ from torch.utils.data.distributed import DistributedSampler
 import torch.multiprocessing as mp
 from natsort import natsorted
 from torchvision.transforms import v2
+import fnmatch
 
 # Import the new SPMLDataset and loss functions
 from dataset import SPMLDataset
 from utils.smpl_loss import GR_loss # Updated import for GR_loss
-
+from itertools import chain
 
 
 """
@@ -75,35 +76,71 @@ def main_worker(rank, world_size, args):
     device = torch.device(f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
 
     # --- Data Loading for SPMLDataset ---
-    num_classes = 4 # Fixed for this task
+    num_classes = 4
 
     all_file_paths = []
     all_labels = []
 
-    # Load data for each class
-    if args.normal_person_dir:
-        normal_person_paths = natsorted(list(pathlib.Path(args.normal_person_dir).glob('**/*.jpg')))
-        all_file_paths.extend(normal_person_paths)
-        all_labels.extend([0] * len(normal_person_paths))
-        if rank == 0: logging.info(f"Loaded {len(normal_person_paths)} images for 'Normal Person'.")
+    # Load data for each class based on a base data_path
+    if args.data_path and os.path.isdir(args.data_path):
+        base_path = pathlib.Path(args.data_path)
 
-    if args.hat_person_dir:
-        hat_person_paths = natsorted(list(pathlib.Path(args.hat_person_dir).glob('**/*.jpg')))
-        all_file_paths.extend(hat_person_paths)
-        all_labels.extend([1] * len(hat_person_paths))
-        if rank == 0: logging.info(f"Loaded {len(hat_person_paths)} images for 'Hat Person'.")
+        class_definitions = {
+            0: ['neckslice', 'glasses'],  # Normal Person
+            1: ['hat'],                   # Hat Person
+            2: ['sunglasses'],            # Sunglass Person
+            3: ['mask']                   # Mask Person
+        }
+        
+        accept_patterns = ['refining_yaw_yaw', 'TS*'] 
 
-    if args.sunglass_person_dir:
-        sunglass_person_paths = natsorted(list(pathlib.Path(args.sunglass_person_dir).glob('**/*.jpg')))
-        all_file_paths.extend(sunglass_person_paths)
-        all_labels.extend([2] * len(sunglass_person_paths))
-        if rank == 0: logging.info(f"Loaded {len(sunglass_person_paths)} images for 'Sunglass Person'.")
+        class_files = {
+                0 : [],
+                1 : [],
+                2 : [],
+                3 : []
+        }
 
-    if args.mask_person_dir:
-        mask_person_paths = natsorted(list(pathlib.Path(args.mask_person_dir).glob('**/*.jpg')))
-        all_file_paths.extend(mask_person_paths)
-        all_labels.extend([3] * len(mask_person_paths))
-        if rank == 0: logging.info(f"Loaded {len(mask_person_paths)} images for 'Mask Person'.")
+        for label, dir_list in class_definitions.items():
+            for subdir in dir_list:
+                image_file_iterator = chain(
+                    (base_path / subdir).glob('**/*.jpg'),
+                    (base_path / subdir).glob('**/*.png')
+                )
+
+                for f_path in image_file_iterator:
+                    path_parts = f_path.parts
+                    if any(fnmatch.fnmatch(part , pattern) for part in path_parts for pattern in accept_patterns):
+                        class_files[label].append(str(f_path))
+                        
+        for label, files in class_files.items():
+            sorted_files = natsorted(files)
+            all_file_paths.extend(sorted_files)
+            all_labels.extend([label] * len(sorted_files))
+
+        if args.plus_hat_data_path and os.path.isdir(args.plus_hat_data_path):
+            base_hat_path = pathlib.Path(args.plus_hat_data_path)
+            
+            all_subdirs = [d for d in base_hat_path.iterdir() if d.is_dir()]
+            sorted_subdirs = natsorted(all_subdirs)
+            
+            slice_index = int(args.fraction_hat * len(sorted_subdirs))
+            selected_dirs = sorted_subdirs[:slice_index]
+
+            hat_files_to_add = []
+            for hat_subdir in selected_dirs:
+                hat_files_to_add.extend([str(p) for p in hat_subdir.glob('**/*.jpg')])
+            
+            class_files[1].extend(hat_files_to_add)
+
+        # Log counts after filtering
+        if rank == 0:
+            for label , files in class_files.items():
+                logging.info(f"Class {label}: {len(files)} files dataset ..")
+
+    else:
+        if rank == 0:
+            logging.error(f"Data path '{args.data_path}' not found or not a directory.")
 
     if not all_file_paths:
         raise ValueError("No image files found. Please check the provided data directories.")
@@ -285,11 +322,12 @@ def main():
     parser.add_argument('--compile', action='store_true', help='Use torch.compile for model optimization')
 
     # Data arguments
-    parser.add_argument('--normal_person_dir', type=str, required=True, help='Directory for "Normal Person" images (Class 0)')
-    parser.add_argument('--hat_person_dir', type=str, required=True, help='Directory for "Hat Person" images (Class 1)')
-    parser.add_argument('--sunglass_person_dir', type=str, required=True, help='Directory for "Sunglass Person" images (Class 2)')
-    parser.add_argument('--mask_person_dir', type=str, required=True, help='Directory for "Mask Person" images (Class 3)')
+    parser.add_argument('--data_path', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터', help='Base directory for the dataset')
     parser.add_argument('--val_split', type=float, default=0.2, help='Fraction of data to use for validation')
+
+    # Hat plus data arguments
+    parser.add_argument('--plus_hat_data_path', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_hat_wear', help='Path to additional hat data (optional)')
+    parser.add_argument('--fraction_hat', type=float, default=0.25, help='Fraction of additional hat data to use (0-1)')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')

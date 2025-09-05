@@ -9,7 +9,7 @@ def GR_loss(preds,label_vec,K,V,Q,epoch,P=None):
     q2,q3=Q
     loss_mtx = torch.zeros_like(preds)
     loss_mtx[label_vec == 1]=neg_log(preds[label_vec == 1])
-    loss_mtx[label_vec == 0]=V[label_vec == 0]*(K[label_vec == 0]*loss1(preds[label_vec == 0],q2)+(1-K[label_vec == 0])*loss2(preds[label_vec == 0],q3))
+    loss_mtx[label_vec == 0]=V[label_vec == 0]*((1-K[label_vec == 0])*loss1(preds[label_vec == 0],q2)+K[label_vec == 0]*loss2(preds[label_vec == 0],q3))
     main_loss=loss_mtx.mean()
     return main_loss
 
