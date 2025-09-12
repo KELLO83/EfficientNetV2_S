@@ -5,7 +5,7 @@ from tqdm import tqdm
 import wandb
 import os
 import pathlib
-from dataset import Sun_glasses_Dataset, Domain_Sun_Glasses_Dataset
+from dataset import Domain_Sun_Glasses_Dataset
 import numpy as np
 import cv2
 import logging
@@ -49,7 +49,7 @@ def cleanup_ddp():
 
 def wandb_init(name='None'):
     wandb.init(
-        project='EfficientNetV2_DANN',
+        project='EfficientNetV2_DANN_Hat',
         name=name,
     )
 
@@ -93,8 +93,7 @@ def main_worker(rank, world_size, args):
 
     # --- Data Loading for DANN ---
     domain_A_wear = list(pathlib.Path(args.wear_dir).glob('**/*.jpg'))
-    domain_A_nowear = list(pathlib.Path(args.nowear_dir).glob('**/*.jpg')) + \
-                      list(pathlib.Path(args.nowear_plus_dir).glob('**/*.jpg'))
+    domain_A_nowear = list(pathlib.Path(args.nowear_dir).glob('**/*.jpg')) 
 
     domain_B_wear = load_extra_data(args.extra_wear_dir, args.extra_data_fraction)
     domain_B_nowear = load_extra_data(args.extra_nowear_dir, args.extra_data_fraction)
@@ -120,16 +119,6 @@ def main_worker(rank, world_size, args):
     val_A_nowear = [p for p, d in zip(val_paths, val_labels_with_domain) if d[1] == 0 and d[2] == 0]
     val_B_wear = [p for p, d in zip(val_paths, val_labels_with_domain) if d[1] == 1 and d[2] == 1]
     val_B_nowear = [p for p, d in zip(val_paths, val_labels_with_domain) if d[1] == 0 and d[2] == 1]
-
-    # train_transform  = v2.Compose([
-    #         v2.ToImage(),
-    #         v2.ToDtype(torch.float32 ,scale=True),
-    #         v2.RandomHorizontalFlip(p=0.3),
-    #         v2.RandomApply([v2.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1)], p=0.25),
-    #         v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 1.5))], p=0.25),
-    #         v2.Resize(size=(320, 320)),
-    #         v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    #     ])
 
     train_transform = v2.Compose([
         v2.ToImage(),
@@ -346,11 +335,10 @@ def main():
     parser.add_argument('--pretrained_path', type=str, default='effcientnet640_s_sunglasses/efficientnetv2_s_dann_best.pth', help='Path to pretrained weights file')
 
     # Data arguments
-    parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/TS2_VAL', help='Directory for "wear" images in Domain A')
+    parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/cap_data_recollect1', help='Directory for "wear" images in Domain A')
     parser.add_argument('--nowear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/neckslice/refining_yaw_yaw', help='Directory for "no wear" images in Domain A')
-    parser.add_argument('--nowear_plus_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/glasses/refining_yaw_yaw', help='Directory for additional "no wear" images in Domain A')
-    parser.add_argument('--extra_wear_dir', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_hat_wear', help='Directory for "wear" images in Domain B (extra)')
-    parser.add_argument('--extra_nowear_dir', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_not_hat_wear', help='Directory for "no wear" images in Domain B (extra)')
+    parser.add_argument('--extra_wear_dir', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_wear_hat', help='Directory for "wear" images in Domain B (extra)')
+    parser.add_argument('--extra_nowear_dir', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_not_wear_hat', help='Directory for "no wear" images in Domain B (extra)')
     parser.add_argument('--extra_data_fraction', type=float, default=0.25, help='Fraction of extra data to use')
 
     # Training arguments

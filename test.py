@@ -140,12 +140,13 @@ with torch.no_grad():
         # DANN model returns (label_output, domain_output)
         # For inference, we only need the label_output and set alpha=0
 
-        if isinstance(model, EfficientNetV2_S_DANN):
-            label_outputs, _ = model(images, alpha=0)
-        else:
+        # if isinstance(model, EfficientNetV2_S_DANN):
+        #     label_outputs, _ = model(images, alpha=0)
+        # else:
         # label_outputs, _ = model(images, alpha=0)
-            label_outputs = model(images)
 
+        label_outputs = model(images)
+        
         # --- 1. Get Predictions ---
         predicted = torch.argmax(label_outputs, dim=1)
         all_preds.extend(predicted.cpu().numpy())

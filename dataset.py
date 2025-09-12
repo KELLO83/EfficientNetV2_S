@@ -112,6 +112,70 @@ class Domain_Sun_Glasses_Dataset(data.Dataset):
         return tensor_image, class_label, domain_label
 
 
+
+class BalancedDomainDataset(data.Dataset):
+    """
+    A dataset designed to work with BalancedBatchSampler.
+
+    It takes four lists of data paths, concatenates them, and assigns labels.
+    It also stores the lengths of each data source for the sampler.
+    """
+    def __init__(self, wear_data1, wear_data2, no_wear_data1, no_wear_data2, train=True):
+        self.train = train
+        
+        self.data_sources = [wear_data1, wear_data2, no_wear_data1, no_wear_data2]
+        self.lengths = [len(d) for d in self.data_sources]
+        self.cumulative_lengths = torch.cumsum(torch.tensor(self.lengths), dim=0).tolist()
+
+        self.data = [item for sublist in self.data_sources for item in sublist]
+
+        # Create labels: 1 for wear, 0 for no-wear
+        wear_labels1 = torch.ones(len(wear_data1), dtype=torch.long)
+        wear_labels2 = torch.ones(len(wear_data2), dtype=torch.long)
+        no_wear_labels1 = torch.zeros(len(no_wear_data1), dtype=torch.long)
+        no_wear_labels2 = torch.zeros(len(no_wear_data2), dtype=torch.long)
+        self.labels = torch.cat([wear_labels1, wear_labels2, no_wear_labels1, no_wear_labels2], dim=0)
+
+        self.train_transform = v2.Compose([
+            v2.ToImage(),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.RandomHorizontalFlip(p=0.3),
+            v2.RandomApply([v2.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1)], p=0.3),
+            v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 1.5))], p=0.3),
+            v2.Resize(size=(640, 640)),
+            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+        self.val_transform = v2.Compose([
+            v2.ToImage(),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Resize(size=(640, 640)),
+            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        try:
+            image = cv2.imread(str(item))
+            if image is None:
+                raise FileNotFoundError(f"Image not found or unable to read: {item}")
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        except Exception as e:
+            print(f"Error loading image {item}: {e}")
+            # Return a placeholder tensor and label to avoid crashing the training loop
+            return torch.randn(3, 640, 640), torch.tensor(-1, dtype=torch.long)
+
+        if self.train:
+            tensor_image = self.train_transform(image)
+        else:
+            tensor_image = self.val_transform(image)
+
+        label = self.labels[idx]
+        return tensor_image, label
+
 class SPMLDataset(data.Dataset):
     """
     SPML (Single Positive Multi-Label) 학습을 위한 커스텀 데이터셋.

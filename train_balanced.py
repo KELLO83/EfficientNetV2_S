@@ -5,7 +5,7 @@ from tqdm import tqdm
 import wandb
 import os
 import pathlib
-from dataset import Sun_glasses_Dataset
+from dataset import BalancedDomainDataset
 import numpy as np
 import cv2
 import logging
@@ -23,6 +23,7 @@ from torch.utils.data.distributed import DistributedSampler
 import torch.multiprocessing as mp
 from collections import OrderedDict
 from natsort import natsorted
+from utils.sampler import BalancedBatchSampler
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
@@ -113,66 +114,64 @@ def main_worker(rank, world_size, args):
     torch.backends.cudnn.benchmark = True
     device = torch.device(f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
 
-    wear_path = pathlib.Path(args.wear_dir)
-    nowear_path = pathlib.Path(args.nowear_dir)
+    wear_path1 = pathlib.Path(args.wear_dir)
+    wear_path2 = pathlib.Path(args.wear_dir2)
+    nowear_path1 = pathlib.Path(args.nowear_dir)
+    nowear_path2 = pathlib.Path(args.nowear_dir2)
 
-    wear_list = list(wear_path.glob('*.jpg')) if wear_path.exists() else []
-    no_wear_list = list(nowear_path.glob('**/*.jpg')) if nowear_path.exists() else []
-
+    wear_list1 = list(wear_path1.glob('*.jpg')) if wear_path1.exists() else []
+    wear_list2 = list(wear_path2.glob('**/*.jpg')) if wear_path2.exists() else []
+    no_wear_list1 = list(nowear_path1.glob('**/*.jpg')) if nowear_path1.exists() else []
+    no_wear_list2 = []
+    
     if args.data_fraction > 0:
         if rank == 0:
-            logging.info(f"Loading {args.data_fraction * 100:.0f}% of extra data from {args.wear_dir2} and {args.nowear_dir2}")
-        no_wear_list.extend(load_extra_data(args.nowear_dir2, args.data_fraction))
+            logging.info(f"Loading {args.data_fraction * 100:.0f}% of extra data from {args.nowear_dir2}")
+        no_wear_list2.extend(load_extra_data(args.nowear_dir2, args.data_fraction))
 
+    if not any([wear_list1, wear_list2, no_wear_list1, no_wear_list2]):
+        raise ValueError("All image lists are empty. Please check data paths.")
 
-    wear2_path = pathlib.Path(args.wear_dir2)
-
-    wear_list.extend(list(wear2_path.glob('**/*.jpg')) if wear2_path.exists() else [])
-
-
-    if not wear_list or not no_wear_list:
-        raise ValueError("Image lists are empty. Please check data paths.")
+    # Split each dataset into train and validation sets
+    train_wear1, val_wear1 = train_test_split(wear_list1, test_size=0.2, random_state=42)
+    train_wear2, val_wear2 = train_test_split(wear_list2, test_size=0.2, random_state=42)
+    train_nowear1, val_nowear1 = train_test_split(no_wear_list1, test_size=0.2, random_state=42)
+    train_nowear2, val_nowear2 = train_test_split(no_wear_list2, test_size=0.2, random_state=42)
 
     if rank == 0:
-        logging.info(f"wear num : {len(wear_list)}")
-        logging.info(f"no wear num : {len(no_wear_list)}")
+        logging.info(f"Train samples: wear1={len(train_wear1)}, wear2={len(train_wear2)}, nowear1={len(train_nowear1)}, nowear2={len(train_nowear2)}")
+        logging.info(f"Val samples: wear1={len(val_wear1)}, wear2={len(val_wear2)}, nowear1={len(val_nowear1)}, nowear2={len(val_nowear2)}")
 
-    wear_labels = [1] * len(wear_list)
-    no_wear_labels = [0] * len(no_wear_list)
-
-    all_data = wear_list + no_wear_list
-    all_labels = wear_labels + no_wear_labels
-
-    train_list, val_list, train_labels, val_labels = train_test_split(
-        all_data, all_labels, test_size=0.2, random_state=42, stratify=all_labels
+    train_dataset = BalancedDomainDataset(
+        wear_data1=train_wear1,
+        wear_data2=train_wear2,
+        no_wear_data1=train_nowear1,
+        no_wear_data2=train_nowear2,
+        train=True
     )
-    
-    train_wear = [path for path, label in zip(train_list, train_labels) if label == 1]
-    train_no_wear = [path for path, label in zip(train_list, train_labels) if label == 0]
 
-    val_wear = [path for path, label in zip(val_list, val_labels) if label == 1]
-    val_no_wear = [path for path, label in zip(val_list, val_labels) if label == 0]
+    val_dataset = BalancedDomainDataset(
+        wear_data1=val_wear1,
+        wear_data2=val_wear2,
+        no_wear_data1=val_nowear1,
+        no_wear_data2=val_nowear2,
+        train=False
+    )
 
-    train_dataset = Sun_glasses_Dataset(wear_data=train_wear, no_wear_data=train_no_wear)
-    val_dataset = Sun_glasses_Dataset(wear_data=val_wear, no_wear_data=val_no_wear , train=False)
-
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank) if world_size > 1 else None
+    train_sampler = BalancedBatchSampler(train_dataset, args.batch_size, world_size, rank)
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
 
-    trainloader = data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None), pin_memory=True, num_workers=os.cpu_count()//world_size, sampler=train_sampler)
+    trainloader = data.DataLoader(train_dataset, batch_sampler=train_sampler, pin_memory=True, num_workers=os.cpu_count()//world_size)
     valloader = data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True, num_workers=os.cpu_count()//world_size, sampler=val_sampler)
 
-    if len(train_no_wear) > 0 and len(train_wear) > 0:
-        count_no_wear = len(train_no_wear)
-        count_wear = len(train_wear)
-        
-        # Calculate weight for each class to handle imbalance.
-        # The weight for a class is inversely proportional to its number of samples.
-        # This gives higher penalty for misclassifying the minority class.
-        weight_for_class_0 = (count_no_wear + count_wear) / (2.0 * count_no_wear)
-        weight_for_class_1 = (count_no_wear + count_wear) / (2.0 * count_wear)
-        
-        # The order in the tensor must match the class indices (0, 1)
+    # Calculate class weights for the training dataset
+    count_wear = len(train_wear1) + len(train_wear2)
+    count_no_wear = len(train_nowear1) + len(train_nowear2)
+    
+    if count_no_wear > 0 and count_wear > 0:
+        total = count_wear + count_no_wear
+        weight_for_class_0 = total / (2.0 * count_no_wear)
+        weight_for_class_1 = total / (2.0 * count_wear)
         class_weights = torch.tensor([weight_for_class_0, weight_for_class_1], device=device)
         
         if rank == 0:
@@ -226,7 +225,7 @@ def main_worker(rank, world_size, args):
     scaler = torch.amp.GradScaler()
     
     for epoch in range(args.epochs):
-        if train_sampler:
+        if isinstance(train_sampler, (DistributedSampler, BalancedBatchSampler)):
             train_sampler.set_epoch(epoch)
             
         model.train()
