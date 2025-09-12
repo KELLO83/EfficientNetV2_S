@@ -1,5 +1,5 @@
 import torch
-from backbone.model import EfficientNetV2_S , EfficientNetV2_S_DANN
+from backbone.model import EfficientNetV2_S , EfficientNetV2_S_DANN , EfficientNetV2_L
 import pathlib
 import natsort
 import torchvision.transforms.v2 as v2
@@ -37,14 +37,21 @@ class SunglassDataset(Dataset):
             
         return image, label
 
-weight_path = 'checkpoints/efficientnetv2_s_dann_best.pth'
+#weight_path = 'effcientnet640_s_sunglasses/efficientnetv2_s_dann_best.pth'
+weight_path = 'effcientnet_s_hat/best_model.pth'
 # Load weights onto the CPU to avoid GPU memory issues
 weight = torch.load(weight_path, map_location='cpu')
 
-if hasattr(weight, 'state_dict'):
-    weight = weight.state_dict()
-else:
-    weight = weight
+# if hasattr(weight, 'state_dict'):
+#     weight = weight.state_dict()
+# else:
+#     weight = weight
+
+try:
+    if weight['model_state_dict'] : 
+        weight = weight['model_state_dict']
+except:
+    pass
 
 print("--- Keys from loaded weights ---")
 for k in weight.keys():
@@ -65,8 +72,9 @@ for k in new_state_dict.keys():
     print(k)
 
 
-model = EfficientNetV2_S_DANN(num_classes=2, num_domains=2)
+#model = EfficientNetV2_S_DANN(num_classes=2, num_domains=2)
 # Load the cleaned state dict
+model = EfficientNetV2_S(num_classes=2)
 result = model.load_state_dict(new_state_dict, strict=True)
 
 print("--- Loading Model Weights ---")
@@ -87,14 +95,14 @@ model.eval()
 transform = v2.Compose([
     v2.ToImage(),
     v2.ToDtype(torch.float32, scale=True),
-    v2.Resize(size=(320 * 2, 320 * 2), antialias=True),
+    v2.Resize(size=(640,640), antialias=True),
     v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
 
 
-wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/wear')
-no_wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/nowear')
+wear = pathlib.Path('/home/ubuntu/KOR_DATA/high_resolution_wear_hat')
+no_wear = pathlib.Path('/home/ubuntu/KOR_DATA/high_resolution_not_wear_hat')
 
 # no_wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/nowear')
 # no_wear = pathlib.Path('elfin_data')
@@ -102,8 +110,10 @@ no_wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/nowear')
 wear_files = natsort.natsorted(list(wear.glob('**/*.jpg')))
 nowear_files = natsort.natsorted(list(no_wear.glob('**/*.jpg')))
 
-print(f"Found {len(wear_files)} images with sunglasses (positive class, label 1).")
-print(f"Found {len(nowear_files)} images without sunglasses (negative class, label 0).")
+
+
+print(f"Found {len(wear_files)} images with item (positive class, label 1).")
+print(f"Found {len(nowear_files)} images without item (negative class, label 0).")
 
 if not wear_files or not nowear_files:
     print(len(wear_files), len(nowear_files))
@@ -129,8 +139,13 @@ with torch.no_grad():
         
         # DANN model returns (label_output, domain_output)
         # For inference, we only need the label_output and set alpha=0
-        label_outputs, _ = model(images, alpha=0)
-        
+
+        if isinstance(model, EfficientNetV2_S_DANN):
+            label_outputs, _ = model(images, alpha=0)
+        else:
+        # label_outputs, _ = model(images, alpha=0)
+            label_outputs = model(images)
+
         # --- 1. Get Predictions ---
         predicted = torch.argmax(label_outputs, dim=1)
         all_preds.extend(predicted.cpu().numpy())

@@ -16,14 +16,14 @@ class Sun_glasses_Dataset(data.Dataset):
             v2.RandomHorizontalFlip(p=0.3),
             v2.RandomApply([v2.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1)], p=0.3),
             v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 1.5))], p=0.3),
-            v2.Resize(size=(320, 320)),
+            v2.Resize(size=(640, 640)),
             v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 
         self.val_transform  = v2.Compose([
             v2.ToImage(),
             v2.ToDtype(torch.float32 ,scale=True),
-            v2.Resize(size=(320, 320)),
+            v2.Resize(size=(640, 640)),
             v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 

@@ -21,7 +21,9 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 import torch.multiprocessing as mp
+from collections import OrderedDict
 from natsort import natsorted
+
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 def setup_ddp(rank, world_size):
@@ -35,7 +37,7 @@ def cleanup_ddp():
 def wandb_init(name='None'):
     name = name
     wandb.init(
-        project='EfficientNetV2',
+        project='EfficientNetV2_hat',
         name=name,
     )
 
@@ -113,19 +115,20 @@ def main_worker(rank, world_size, args):
 
     wear_path = pathlib.Path(args.wear_dir)
     nowear_path = pathlib.Path(args.nowear_dir)
-    nowear_plus_path = pathlib.Path(args.nowear_plus_dir)
 
-    wear_list = list(wear_path.glob('**/*.jpg')) if wear_path.exists() else []
-    no_wear_list = []
-    if nowear_path.exists():
-        no_wear_list.extend(list(nowear_path.glob('**/*.jpg')))
-    if nowear_plus_path.exists():
-        no_wear_list.extend(list(nowear_plus_path.glob('**/*.jpg')))
+    wear_list = list(wear_path.glob('*.jpg')) if wear_path.exists() else []
+    no_wear_list = list(nowear_path.glob('**/*.jpg')) if nowear_path.exists() else []
+
+    if args.data_fraction > 0:
+        if rank == 0:
+            logging.info(f"Loading {args.data_fraction * 100:.0f}% of extra data from {args.wear_dir2} and {args.nowear_dir2}")
+        no_wear_list.extend(load_extra_data(args.nowear_dir2, args.data_fraction))
 
 
-    if args.extra_data_fraction > 0:
-        wear_list.extend(load_extra_data(args.extra_wear_dir, args.extra_data_fraction))
-        no_wear_list.extend(load_extra_data(args.extra_nowear_dir, args.extra_data_fraction))
+    wear2_path = pathlib.Path(args.wear_dir2)
+
+    wear_list.extend(list(wear2_path.glob('**/*.jpg')) if wear2_path.exists() else [])
+
 
     if not wear_list or not no_wear_list:
         raise ValueError("Image lists are empty. Please check data paths.")
@@ -214,7 +217,7 @@ def main_worker(rank, world_size, args):
     #scheduler = CosineAnnealingLR(optimizer, T_max=10, eta_min=1e-6)
 
     scheduler = PolynomialLRWarmup(
-        optimizer, warmup_iters=10, total_iters=args.max_epoch, power=1.0 , limit_lr = 1e-7
+        optimizer, warmup_iters=10, total_iters=args.epochs, power=1.0 , limit_lr = 1e-7
     )
 
     early_stopping = EarlyStopping(patience=10, verbose=True)
@@ -291,13 +294,52 @@ def main_worker(rank, world_size, args):
         if rank == 0:
             logging.info(f"Epoch {epoch+1}, Train Loss: {train_loss/len(trainloader):.4f}, Train Acc: {train_accuracy:.2f}%, Val Loss: {val_loss/len(valloader):.4f}, Val Acc: {val_accuracy:.2f}%")
 
+
+            if (epoch + 1) % 2 == 0 :
+                state_to_save = model.module.state_dict() if world_size > 1 else model.state_dict()
+                
+                cleaned_state_dict = OrderedDict()
+                for k, v in state_to_save.items():
+                    if '_orig_mod.' in k:
+                        name = k.replace('_orig_mod.', '')
+                    else:
+                        name = k
+                    cleaned_state_dict[name] = v
+                
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': cleaned_state_dict,
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'best_val_acc': best_val_acc
+                }
+
+                if not os.path.exists('checkpoints'):
+                    os.makedirs('checkpoints')
+                    
+                torch.save(checkpoint, os.path.join('checkpoints' , f'{args.model}_{epoch+1}.pth'))
+                logging.info("Saved best model and optimizer state.")
+                logging.info(f"Saved checkpoint at epoch {epoch+1}.")
+
+
             if val_accuracy > best_val_acc:
                 best_val_acc = val_accuracy
                 os.makedirs('checkpoints', exist_ok=True)
 
+                state_to_save = model.module.state_dict() if world_size > 1 else model.state_dict()
+                
+                cleaned_state_dict = OrderedDict()
+                for k, v in state_to_save.items():
+                    if '_orig_mod' in k:
+                        name = k.replace('_orig_mod.', '')
+                    else:
+                        name = k
+                    cleaned_state_dict[name] = v
+                
+
                 checkpoint = {
                 'epoch': epoch,
-                'model_state_dict': model.module.state_dict() if world_size > 1 else model.state_dict(),
+                'model_state_dict': cleaned_state_dict,
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_acc': best_val_acc
@@ -328,21 +370,20 @@ def main():
     parser = argparse.ArgumentParser(description='EfficientNetV2 Training')
     
     # Model arguments
-    parser.add_argument('--model', type=str, default='efficientnetv2_l', choices=['efficientnetv2_s', 'efficientnetv2_l'], help='Model type')
+    parser.add_argument('--model', type=str, default='efficientnetv2_s', choices=['efficientnetv2_s', 'efficientnetv2_l'], help='Model type')
     parser.add_argument('--pretrained', action='store_true', help='Use pretrained weights')
     parser.add_argument('--weight_path', type=str, default='checkpoints/best_model.pth', help='Path to model weights')
 
     # Data arguments
-    parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/sunglass/refining_yaw_yaw', help='Directory for "wear" images')
-    parser.add_argument('--nowear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/earing/refining_yaw_yaw', help='Directory for "no wear" images')
-    parser.add_argument('--nowear_plus_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/glasses/refining_yaw_yaw', help='Directory for additional "no wear" images')
-    parser.add_argument('--extra_wear_dir', type=str, default='/home/ubuntu/KOR_DATA/sunglass_dataset/wear/wear_data2', help='Directory for extra "wear" images')
-    parser.add_argument('--extra_nowear_dir', type=str, default='/home/ubuntu/KOR_DATA/sunglass_dataset/nowear/no_wear_data2', help='Directory for extra "no wear" images')
-    parser.add_argument('--extra_data_fraction', type=float, default=0.25, help='Fraction of extra data to use')
+    parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/cap_data_recollect2')
+    parser.add_argument('--wear_dir2' , type=str , default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/cap_data_recollect1')
+    parser.add_argument('--nowear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/neckslice/refining_yaw_yaw', help='Directory for "no wear" images')
+    parser.add_argument('--nowear_dir2', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/glasses/refining_yaw_yaw', help='Directory for additional "no wear" images')
+    parser.add_argument('--data_fraction', type=float, default=1, help='Fraction of extra data to use (0.0 to 1.0)')
 
     # Training arguments
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for training')
     parser.add_argument('--find_batch_size', action='store_true', help='Find the maximum batch size before training')
     parser.add_argument('--no_confirm', action='store_true', help='Skip argument confirmation prompt')
 

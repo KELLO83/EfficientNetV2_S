@@ -343,14 +343,14 @@ def main():
     parser.add_argument('--domain_b_fraction', type=float, default=0.2, help='Fraction of domain B data in each batch for balanced sampling.')
     parser.add_argument('--compile', action='store_true', help='Use torch.compile for model optimization')
     parser.add_argument('--pretrained', action='store_true', help='Use pretrained weights for the backbone model')
-    parser.add_argument('--pretrained_path', type=str, default='effcientnet640_s/efficientnetv2_s_dann_best.pth', help='Path to pretrained weights file')
+    parser.add_argument('--pretrained_path', type=str, default='effcientnet640_s_sunglasses/efficientnetv2_s_dann_best.pth', help='Path to pretrained weights file')
 
     # Data arguments
-    parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/sunglass/refining_yaw_yaw', help='Directory for "wear" images in Domain A')
-    parser.add_argument('--nowear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/earing/refining_yaw_yaw', help='Directory for "no wear" images in Domain A')
+    parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/TS2_VAL', help='Directory for "wear" images in Domain A')
+    parser.add_argument('--nowear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/neckslice/refining_yaw_yaw', help='Directory for "no wear" images in Domain A')
     parser.add_argument('--nowear_plus_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/glasses/refining_yaw_yaw', help='Directory for additional "no wear" images in Domain A')
-    parser.add_argument('--extra_wear_dir', type=str, default='/home/ubuntu/KOR_DATA/sunglass_dataset/wear/wear_data2', help='Directory for "wear" images in Domain B (extra)')
-    parser.add_argument('--extra_nowear_dir', type=str, default='/home/ubuntu/KOR_DATA/sunglass_dataset/nowear/no_wear_data2', help='Directory for "no wear" images in Domain B (extra)')
+    parser.add_argument('--extra_wear_dir', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_hat_wear', help='Directory for "wear" images in Domain B (extra)')
+    parser.add_argument('--extra_nowear_dir', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_not_hat_wear', help='Directory for "no wear" images in Domain B (extra)')
     parser.add_argument('--extra_data_fraction', type=float, default=0.25, help='Fraction of extra data to use')
 
     # Training arguments
