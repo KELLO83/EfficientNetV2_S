@@ -120,13 +120,14 @@ def main_worker(rank, world_size, args):
     nowear_path2 = pathlib.Path(args.nowear_dir2)
 
     wear_list1 = list(wear_path1.glob('*.jpg')) if wear_path1.exists() else []
-    wear_list2 = list(wear_path2.glob('**/*.jpg')) if wear_path2.exists() else []
+    wear_list2 = []
     no_wear_list1 = list(nowear_path1.glob('**/*.jpg')) if nowear_path1.exists() else []
     no_wear_list2 = []
     
     if args.data_fraction > 0:
         if rank == 0:
             logging.info(f"Loading {args.data_fraction * 100:.0f}% of extra data from {args.nowear_dir2}")
+        wear_list1.extend(load_extra_data(args.wear_dir2, args.data_fraction))
         no_wear_list2.extend(load_extra_data(args.nowear_dir2, args.data_fraction))
 
     if not any([wear_list1, wear_list2, no_wear_list1, no_wear_list2]):

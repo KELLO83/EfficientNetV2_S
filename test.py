@@ -38,7 +38,7 @@ class SunglassDataset(Dataset):
         return image, label
 
 #weight_path = 'effcientnet640_s_sunglasses/efficientnetv2_s_dann_best.pth'
-weight_path = 'effcientnet_s_hat/best_model.pth'
+weight_path = 'checkpoints/efficientnetv2_s_dann_best.pth'
 # Load weights onto the CPU to avoid GPU memory issues
 weight = torch.load(weight_path, map_location='cpu')
 
@@ -72,9 +72,9 @@ for k in new_state_dict.keys():
     print(k)
 
 
-#model = EfficientNetV2_S_DANN(num_classes=2, num_domains=2)
+model = EfficientNetV2_S_DANN(num_classes=2, num_domains=2)
 # Load the cleaned state dict
-model = EfficientNetV2_S(num_classes=2)
+#model = EfficientNetV2_S(num_classes=2)
 result = model.load_state_dict(new_state_dict, strict=True)
 
 print("--- Loading Model Weights ---")
@@ -145,7 +145,7 @@ with torch.no_grad():
         # else:
         # label_outputs, _ = model(images, alpha=0)
 
-        label_outputs = model(images)
+        label_outputs  , _ = model(images)
         
         # --- 1. Get Predictions ---
         predicted = torch.argmax(label_outputs, dim=1)

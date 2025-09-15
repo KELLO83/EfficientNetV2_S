@@ -332,7 +332,7 @@ def main():
     parser.add_argument('--domain_b_fraction', type=float, default=0.2, help='Fraction of domain B data in each batch for balanced sampling.')
     parser.add_argument('--compile', action='store_true', help='Use torch.compile for model optimization')
     parser.add_argument('--pretrained', action='store_true', help='Use pretrained weights for the backbone model')
-    parser.add_argument('--pretrained_path', type=str, default='effcientnet640_s_sunglasses/efficientnetv2_s_dann_best.pth', help='Path to pretrained weights file')
+    parser.add_argument('--pretrained_path', type=str, default='checkpoints/efficientnetv2_s_dann_best.pth', help='Path to pretrained weights file')
 
     # Data arguments
     parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/cap_data_recollect1', help='Directory for "wear" images in Domain A')
