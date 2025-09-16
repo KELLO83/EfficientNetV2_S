@@ -50,7 +50,7 @@ def build_param_groups_lrd(model: nn.Module):
 
 
 def set_trainable_efficientnet_v2s(model: nn.Module, unfreeze_stages, train_bn_affine: bool = True, verbose: bool = True):
-    
+      
     for _, p in model.named_parameters():
         p.requires_grad = False
 
@@ -87,9 +87,12 @@ class EfficientNetV2_S_improved(torch.nn.Module):
         set_trainable_efficientnet_v2s(self.model, unfreeze_stages=("5.14","5.13"), train_bn_affine=True, verbose=True)
     
 
-    def forward(self, x):
-        x = self.model(x)
-        return x
+    def forward(self, x, return_features: bool = False):
+        features = self.model.forward_features(x)
+        logits = self.model.forward_head(features, pre_logits=False)
+        if return_features:
+            return logits, features
+        return logits
     
 
 class EfficientNetV2_S(torch.nn.Module):
@@ -130,9 +133,12 @@ class EfficientNetV2_S(torch.nn.Module):
         # print("----------------------------------------------------")
     
 
-    def forward(self, x):
-        x = self.model(x)
-        return x
+    def forward(self, x, return_features: bool = False):
+        features = self.model.forward_features(x)
+        logits = self.model.forward_head(features, pre_logits=False)
+        if return_features:
+            return logits, features
+        return logits
     
 class EfficientNetV2_L(torch.nn.Module):
     def __init__(self , num_classes = 2):
@@ -177,9 +183,12 @@ class EfficientNetV2_L(torch.nn.Module):
         # print("----------------------------------------------------")
 
 
-    def forward(self, x):
-        x = self.model(x)
-        return x
+    def forward(self, x, return_features: bool = False):
+        features = self.model.forward_features(x)
+        logits = self.model.forward_head(features, pre_logits=False)
+        if return_features:
+            return logits, features
+        return logits
 
 class GradientReversalFunction(Function):
     """
@@ -271,21 +280,51 @@ class EfficientNetV2_S_DANN(nn.Module):
 #         return GradientReversalFunction.apply(x, self.alpha)
 
 
+class ConvNext_V2_Tiny(nn.Module):
+    def __init__(self, num_classes=2):
+        super(ConvNext_V2_Tiny, self).__init__()
+        self.model = timm.create_model('convnextv2_tiny.fcmae_ft_in22k_in1k_384', pretrained=True , num_classes=num_classes)
+        
+        for name , param in self.model.named_parameters():
+            param.requires_grad = False
 
+        for name , param in self.model.named_parameters():
+            if name.startswith('head') or name.startswith('stages.3.blocks.0'):
+                param.requires_grad = True
+
+        print("Verifying parameter freeze status:")
+        total_params = 0
+        trainable_params = 0
+        for name, param in self.model.named_parameters():
+            total_params += param.numel()
+            if param.requires_grad:
+                trainable_params += param.numel()
+                print(f"- {name} (Trainable)")
+
+        print(f"Total parameters: {total_params}")
+        print(f"Trainable parameters: {trainable_params}")
+        print(f"Percentage of trainable parameters: {100.0 * trainable_params / total_params:.2f}%")
+
+    def forward(self, x, return_features: bool = False):
+        features = self.model.forward_features(x)
+        logits = self.model.forward_head(features, pre_logits=False)
+        if return_features:
+            return logits, features
+        return logits
 
 
 if __name__ == "__main__":
 
+    model = ConvNext_V2_Tiny()
+    
 
 
+    # model = EfficientNetV2_S_improved()
 
-    model = EfficientNetV2_S_improved()
-
-    backbone_params = sum(p.numel() for p in model.parameters())
-    trainable_backbone_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model total params: {backbone_params:,}")
-    print(f"Model trainable params: {trainable_backbone_params:,}")
-    print(f"traineable params percentage: {100 * trainable_backbone_params / backbone_params:.2f}%")
-    print('==' * 30)
-
+    # backbone_params = sum(p.numel() for p in model.parameters())
+    # trainable_backbone_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # print(f"Model total params: {backbone_params:,}")
+    # print(f"Model trainable params: {trainable_backbone_params:,}")
+    # print(f"traineable params percentage: {100 * trainable_backbone_params / backbone_params:.2f}%")
+    # print('==' * 30)
 

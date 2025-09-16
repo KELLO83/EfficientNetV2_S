@@ -166,6 +166,30 @@ def mixup_data(x: torch.Tensor, y: torch.Tensor, alpha: float):
     y_a, y_b = y, y[index]
     return mixed_x, y_a, y_b, lam
 
+
+def deep_coral_loss(source: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Deep CORAL loss as defined in https://arxiv.org/abs/1607.01719."""
+    if source.ndim > 2:
+        source = source.flatten(start_dim=1)
+    if target.ndim > 2:
+        target = target.flatten(start_dim=1)
+
+    ns = source.size(0)
+    nt = target.size(0)
+
+    if ns <= 1 or nt <= 1:
+        return torch.zeros((), device=source.device, dtype=source.dtype)
+
+    source = source - source.mean(dim=0, keepdim=True)
+    target = target - target.mean(dim=0, keepdim=True)
+
+    cov_source = (source.T @ source) / (ns - 1)
+    cov_target = (target.T @ target) / (nt - 1)
+
+    loss = (cov_source - cov_target).pow(2).sum()
+    d = source.size(1)
+    return loss / (4.0 * d * d)
+
 class EMA:
     def __init__(self, model: torch.nn.Module, decay: float = 0.999):
         self.decay = decay
@@ -323,6 +347,7 @@ def main_worker(rank, world_size, args):
         fda_images=fda_images,
         fda_beta=args.fda_beta,
         fda_prob=args.fda_prob,
+        return_domain=True,
     )
     val_dataset = custom_dataset_FDA(
         wear_data=val_wear,
@@ -423,7 +448,7 @@ def main_worker(rank, world_size, args):
     ema = EMA(unwrap_model(model), decay=args.ema_decay) if args.use_ema else None
     
     if rank == 0:
-        checkpoint_dir = 'checkpoints'
+        checkpoint_dir = os.path.join('checkpoints', args.model)
         os.makedirs(checkpoint_dir, exist_ok=True)
 
     for epoch in range(args.epochs):
@@ -438,23 +463,42 @@ def main_worker(rank, world_size, args):
         train_loss = 0.0
         correct_train = 0
         total_train = 0
+        coral_loss_sum = 0.0
         
         pbar_train = tqdm(trainloader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]", disable=(rank != 0))
-        for data_input, label in pbar_train:
+        for batch in pbar_train:
+            if len(batch) == 3:
+                data_input, label, domain_labels = batch
+                domain_labels = domain_labels.to(device, non_blocking=True)
+            else:
+                data_input, label = batch
+                domain_labels = None
             data_input = data_input.to(device, non_blocking=True)
             label = label.to(device, non_blocking=True)
 
             optimizer.zero_grad()
             
-            inputs, targets_a, targets_b, lam = mixup_data(data_input, label, args.mixup_alpha)
-
             # Use autocast only when CUDA is available (safer across PyTorch versions)
             with torch.amp.autocast(device_type=device.type, enabled=(device.type == 'cuda')):
-                logit = model(inputs)
+                logits_base, features = model(data_input, return_features=True)
+                features = features.flatten(start_dim=1)
+
+                coral_val = torch.zeros((), device=device, dtype=features.dtype)
+                if domain_labels is not None and args.coral_lambda > 0.0:
+                    source_mask = domain_labels == 0
+                    target_mask = domain_labels == 1
+                    if source_mask.any() and target_mask.any():
+                        coral_val = deep_coral_loss(features[source_mask], features[target_mask])
+
                 if args.mixup_alpha > 0.0:
-                    loss = lam * criterion(logit, targets_a) + (1 - lam) * criterion(logit, targets_b)
+                    inputs_mix, targets_a, targets_b, lam = mixup_data(data_input, label, args.mixup_alpha)
+                    logit = model(inputs_mix)
+                    cls_loss = lam * criterion(logit, targets_a) + (1 - lam) * criterion(logit, targets_b)
                 else:
-                    loss = criterion(logit, label)
+                    logit = logits_base
+                    cls_loss = criterion(logit, label)
+
+                loss = cls_loss + (args.coral_lambda * coral_val)
             
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -463,6 +507,7 @@ def main_worker(rank, world_size, args):
                 ema.update(unwrap_model(model))
 
             train_loss += loss.item()
+            coral_loss_sum += coral_val.item()
             _, predicted = torch.max(logit.data, 1)
             total_train += label.size(0)
             if args.mixup_alpha > 0.0:
@@ -471,10 +516,10 @@ def main_worker(rank, world_size, args):
                 correct_train += (predicted == label).sum().item()
             
             if rank == 0:
-                pbar_train.set_postfix({'loss': loss.item()})
+                pbar_train.set_postfix({'loss': loss.item(), 'coral': coral_val.item()})
 
         train_accuracy = 100 * correct_train / total_train
-        
+
         if ema is not None and args.ema_eval:
             ema.apply_shadow(unwrap_model(model))
         model.eval()
@@ -513,6 +558,7 @@ def main_worker(rank, world_size, args):
             wandb.log({
                "Train Loss": train_loss / len(trainloader),
                "Train Accuracy": train_accuracy,
+               "Train Coral Loss": coral_loss_sum / len(trainloader),
                "Val Loss": avg_val_loss,
                "Val Accuracy": val_accuracy,
                "Learning Rate": scheduler.get_last_lr()[0]
@@ -614,6 +660,7 @@ def main():
 
     parser.add_argument('--mixup_alpha', type=float, default=0.2, help='Mixup alpha (0 disables mixup)')
     parser.add_argument('--label_smoothing', type=float, default=0.1, help='CrossEntropy label smoothing')
+    parser.add_argument('--coral_lambda', type=float, default=0.5, help='Weight for Deep CORAL alignment loss')
 
     # Boolean flags with default True via paired options
     parser.add_argument('--bn_freeze_stats', dest='bn_freeze_stats', action='store_true', help='Freeze BN running stats during training')
