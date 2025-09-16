@@ -283,7 +283,7 @@ def main_worker(rank, world_size, args):
         plt.ylabel('Density')
         plt.legend()
         plt.grid(True, linestyle='--', alpha=0.6)
-        plt.savefig('similarity_distribution.png')
+        #plt.savefig('similarity_distribution.png')
         plt.show()
 
     if world_size > 1:
@@ -293,7 +293,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='DDP evaluation with mp.spawn')
     parser.add_argument('--wear', type=str, help='Directory with positive class images (wear)')
     parser.add_argument('--nowear', type=str, help='Directory with negative class images (no-wear)')
-    parser.add_argument('--img-size', type=int, default=640, help='Square image size for resizing')
+    parser.add_argument('--img-size', type=int, default=384, help='Square image size for resizing')
     parser.add_argument('--model', type=str, default='s', choices=['s', 's_dann', 'l'], help='Model variant: s, s_dann, or l')
     parser.add_argument('--weights', type=str, default='checkpoints/best_model.pth', help='Path to model weights .pth')
     parser.add_argument('--batch-size', type=int, default=64, help='Batch size per process')
@@ -305,7 +305,7 @@ def parse_args():
         args.wear = '/media/ubuntu/새 볼륨/dataset/034.마스크 착용 한국인 안면 이미지 데이터/01.데이터/1.Training/원천데이터/yolo_face_detection_result_1'
     if not args.nowear:
         args.nowear = '/home/ubuntu/KOR_DATA/high_resolution_not_wear_hat'
-    
+        args.nowear = '/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/neckslice/refining_yaw_yaw'
     return args
 
 def main():

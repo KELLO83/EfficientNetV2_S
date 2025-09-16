@@ -1,15 +1,21 @@
+import random
+import numpy as np
 import torchvision.transforms.v2 as v2
 from torch.utils import data
 import torch
 import cv2
 import pathlib # Added for pathlib.Path
-from typing import List, Tuple, Callable, Dict, Any # Added for type hints
+from typing import List, Tuple, Callable, Dict, Any, Optional # Added for type hints
 
-class custom_dataset(data.Dataset):
-    def __init__(self, wear_data=None, no_wear_data=None , train = True , img_size =  320):
+class custom_dataset_FDA(data.Dataset):
+    def __init__(self, wear_data=None, no_wear_data=None , train = True , img_size =  320,
+                 fda_images: Optional[List[pathlib.Path]] = None, fda_beta: float = 0.0, fda_prob: float = 0.0):
         self.train = train
         self.wear_data = wear_data
         self.no_wear_data = no_wear_data
+        self.fda_images = fda_images or []
+        self.fda_beta = max(0.0, fda_beta)
+        self.fda_prob = max(0.0, min(1.0, fda_prob))
         self.train_transform = v2.Compose([
             v2.ToImage(),
             v2.ToDtype(torch.float32, scale=True),
@@ -51,6 +57,8 @@ class custom_dataset(data.Dataset):
         item = self.data[idx]
         image = cv2.imread(str(item))
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        if self.train and self.fda_images and self.fda_beta > 0 and random.random() < self.fda_prob:
+            image = self._apply_fda(image)
         if self.train:
             tensor_image = self.train_transform(image)
         else:
@@ -58,6 +66,113 @@ class custom_dataset(data.Dataset):
 
         label = self.labels[idx]
         return tensor_image , label
+
+    def _apply_fda(self, src_img: np.ndarray) -> np.ndarray:
+        """Apply Fourier Domain Adaptation using a random image from the FDA pool."""
+        style_path = random.choice(self.fda_images)
+        style_img = cv2.imread(str(style_path))
+        if style_img is None:
+            return src_img
+
+        style_img = cv2.cvtColor(style_img, cv2.COLOR_BGR2RGB)
+        h, w = src_img.shape[:2]
+        if h == 0 or w == 0:
+            return src_img
+
+        style_img = cv2.resize(style_img, (w, h), interpolation=cv2.INTER_LINEAR)
+
+        return self._fda_source_to_target(src_img, style_img, self.fda_beta)
+
+    @staticmethod
+    def _fda_source_to_target(src_img: np.ndarray, tgt_img: np.ndarray, beta: float) -> np.ndarray:
+        src_img = src_img.astype(np.float32)
+        tgt_img = tgt_img.astype(np.float32)
+
+        src_fft = np.fft.fft2(src_img, axes=(0, 1))
+        tgt_fft = np.fft.fft2(tgt_img, axes=(0, 1))
+
+        src_amp, src_phase = np.abs(src_fft), np.angle(src_fft)
+        tgt_amp = np.abs(tgt_fft)
+
+        src_amp_shift = np.fft.fftshift(src_amp, axes=(0, 1))
+        tgt_amp_shift = np.fft.fftshift(tgt_amp, axes=(0, 1))
+
+        h, w = src_img.shape[:2]
+        if beta <= 0:
+            return src_img
+
+        radius = max(1, int(np.floor(min(h, w) * beta)))
+        c_h, c_w = h // 2, w // 2
+        h1 = max(0, c_h - radius)
+        h2 = min(h, c_h + radius)
+        w1 = max(0, c_w - radius)
+        w2 = min(w, c_w + radius)
+
+        if h1 < h2 and w1 < w2:
+            src_amp_shift[h1:h2, w1:w2] = tgt_amp_shift[h1:h2, w1:w2]
+
+        src_amp = np.fft.ifftshift(src_amp_shift, axes=(0, 1))
+        mixed_fft = src_amp * np.exp(1j * src_phase)
+        mixed_img = np.fft.ifft2(mixed_fft, axes=(0, 1))
+        mixed_img = np.real(mixed_img)
+        mixed_img = np.clip(mixed_img, 0, 255).astype(np.uint8)
+        return mixed_img
+
+
+class custom_dataset(data.Dataset):
+    def __init__(self, wear_data=None, no_wear_data=None , train = True , img_size =  320):
+        self.train = train
+        self.wear_data = wear_data
+        self.no_wear_data = no_wear_data
+        self.train_transform = v2.Compose([
+            v2.ToImage(),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.RandomHorizontalFlip(p=0.5),
+            v2.RandomApply([v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.08, hue=0.01)], p=0.25),
+
+            v2.RandomApply([
+                v2.RandomChoice([
+                    v2.RandomAffine(degrees=6, translate=(0.015, 0.015), scale=(0.97, 1.03), shear=(-2, 2)),
+                    v2.RandomPerspective(distortion_scale=0.08)
+                ])
+            ], p=0.6),
+            v2.RandomApply([v2.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.1),
+
+            v2.Resize(size=(img_size, img_size)),
+            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            v2.RandomErasing(p=0.05, scale=(0.02, 0.05), ratio=(0.3, 3.3), value=0),
+        ])
+        
+        self.val_transform  = v2.Compose([
+            v2.ToImage(),
+            v2.ToDtype(torch.float32 ,scale=True),
+            v2.Resize(size=(img_size, img_size)),
+            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+
+
+        wear_label = torch.ones(len(self.wear_data), dtype=torch.long)
+        no_wear_label = torch.zeros(len(self.no_wear_data), dtype=torch.long)
+        self.labels = torch.cat([wear_label, no_wear_label], dim=0)
+
+        self.data = self.wear_data + self.no_wear_data
+    def __len__(self):
+        return len(self.wear_data) + len(self.no_wear_data)
+
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        image = cv2.imread(str(item))
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        if self.train:
+            tensor_image = self.train_transform(image)
+        else:
+            tensor_image = self.val_transform(image)
+
+        label = self.labels[idx]
+        return tensor_image , label
+
+
 
 class Domain_Sun_Glasses_Dataset(data.Dataset):
     """

@@ -1,11 +1,12 @@
 import logging
+import sys
 import torch
 from torch.utils import data
 from tqdm import tqdm
 import wandb
 import os
 import pathlib
-from dataset import custom_dataset
+from dataset import custom_dataset_FDA
 import numpy as np
 import cv2
 import logging
@@ -15,10 +16,9 @@ from backbone.model import (
     EfficientNetV2_L,
     EfficientNetV2_S_improved,
     build_param_groups_lrd,
-    set_trainable_efficientnet_v2s,
 )
 
-import torchinfo
+
 from sklearn.model_selection import train_test_split
 from utils.early_stop import EarlyStopping
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -45,7 +45,7 @@ def setup_ddp(rank, world_size):
 def cleanup_ddp():
     dist.destroy_process_group()
 
-def wandb_init(name='None'):
+def wandb_init(project , name='None'):
     name = name
     wandb.init(
         project='EfficientNetV2_Improved',
@@ -63,10 +63,12 @@ def data_check(loader: DataLoader, is_bgr: bool):
     # Inverse of Normalize(mean, std) used in dataset.py
     mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-
+    labels = []
     cv2.namedWindow('Data Check - Press any key to continue', cv2.WINDOW_NORMAL)
-    for images, _ in it:
+    for images, label in it:
+        labels = []
         images_unnorm = images.clone()
+        labels.extend(label.cpu().numpy().tolist())
         images_unnorm.mul_(std).add_(mean)
         grid = torchvision.utils.make_grid(images_unnorm, nrow=8)
         grid = torch.clamp(grid, 0, 1)
@@ -78,13 +80,14 @@ def data_check(loader: DataLoader, is_bgr: bool):
             grid_np = cv2.cvtColor(grid_np, cv2.COLOR_RGB2BGR)
         
         cv2.imshow('Data Check - Press any key to continue', grid_np)
+        print("Labels in this batch:", labels)
         key = cv2.waitKey(0)
         if key == 27:
             logging.info("ESC key pressed. Exiting data check.")
             break
 
     cv2.destroyAllWindows()
-    return
+    exit(0)
 
 
 def find_max_batch_size(model, input_shape, device):
@@ -203,6 +206,25 @@ def load_extra_data(path, fraction):
         logging.warning(f"No image files found in the specified extra data directory: {path}")
     return selected_images
 
+
+def collect_image_paths(path: str):
+    """Collect image files (jpg/png/jpeg/bmp) recursively from a directory."""
+    p = pathlib.Path(path)
+    if not p.exists():
+        logging.warning(f"FDA data path not found: {path}")
+        return []
+
+    patterns = ['**/*.jpg', '**/*.jpeg', '**/*.png', '**/*.bmp']
+    images = set()
+    for pattern in patterns:
+        images.update(p.glob(pattern))
+        images.update(p.glob(pattern.upper()))
+
+    image_list = natsorted(list(images))
+    if not image_list:
+        logging.warning(f"No image files found in the specified FDA directory: {path}")
+    return image_list
+
     
 
 def main_worker(rank, world_size, args):
@@ -217,7 +239,7 @@ def main_worker(rank, world_size, args):
         setup_ddp(rank, world_size)
     
     if rank == 0 and args.wandb:
-        wandb_init(name=f'{args.wandb_name}')
+        wandb_init(project=f'{args.project}' , name=f'{args.wandb_name}')
 
     torch.backends.cudnn.benchmark = True
     device = torch.device(f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
@@ -229,6 +251,10 @@ def main_worker(rank, world_size, args):
 
         wear_list = list(wear_path.glob('*.jpg')) if wear_path.exists() else []
         no_wear_list = list(nowear_path.glob('**/*.jpg')) if nowear_path.exists() else []
+
+        fda_images = collect_image_paths(args.FDA_data) if args.FDA_data else []
+        if fda_images:
+            logging.info(f"Loaded {len(fda_images)} FDA reference images from {args.FDA_data}")
 
         if args.data_fraction > 0:
             logging.info(f"Loading {args.data_fraction * 100:.0f}% of extra data from {args.wear_dir2} and {args.nowear_dir2}")
@@ -259,7 +285,8 @@ def main_worker(rank, world_size, args):
                 'train_list': train_list,
                 'val_list': val_list,
                 'train_labels': train_labels,
-                'val_labels': val_labels
+                'val_labels': val_labels,
+                'fda_images': fda_images
             }
             dist.broadcast_object_list([data_to_share], src=0)
     else:
@@ -271,6 +298,12 @@ def main_worker(rank, world_size, args):
         val_list = data_to_share['val_list']
         train_labels = data_to_share['train_labels']
         val_labels = data_to_share['val_labels']
+        fda_images = data_to_share.get('fda_images', [])
+
+    if world_size == 1:
+        # Ensure fda_images initialized on single GPU setup
+        if "fda_images" not in locals():
+            fda_images = collect_image_paths(args.FDA_data) if args.FDA_data else []
 
 
     train_wear = [path for path, label in zip(train_list, train_labels) if label == 1]
@@ -279,8 +312,21 @@ def main_worker(rank, world_size, args):
     val_wear = [path for path, label in zip(val_list, val_labels) if label == 1]
     val_no_wear = [path for path, label in zip(val_list, val_labels) if label == 0]
 
-    train_dataset = custom_dataset(wear_data=train_wear, no_wear_data=train_no_wear , img_size= args.img_size , train=True)
-    val_dataset = custom_dataset(wear_data=val_wear, no_wear_data=val_no_wear , train=False , img_size= args.img_size)
+    train_dataset = custom_dataset_FDA(
+        wear_data=train_wear,
+        no_wear_data=train_no_wear,
+        img_size=args.img_size,
+        train=True,
+        fda_images=fda_images,
+        fda_beta=args.fda_beta,
+        fda_prob=args.fda_prob,
+    )
+    val_dataset = custom_dataset_FDA(
+        wear_data=val_wear,
+        no_wear_data=val_no_wear,
+        train=False,
+        img_size=args.img_size,
+    )
 
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank) if world_size > 1 else None
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
@@ -539,7 +585,7 @@ def main():
     # Model arguments
     parser.add_argument('--model', type=str, default='efficientnetv2_s_improved', choices=['efficientnetv2_s', 'efficientnetv2_l', 'efficientnetv2_s_improved'], help='Model type')
     parser.add_argument('--pretrained', action='store_true', help='Use pretrained weights')
-    parser.add_argument('--weight_path', type=str, default='checkpoints/efficientnetv2_improved/best_model.pth', help='Path to model weights')
+    parser.add_argument('--weight_path', type=str, default='effcientnet_s_mask_384/best_model.pth', help='Path to model weights')
 
     # Data arguments
     parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/마스크_원시데이터/TS1')
@@ -548,6 +594,9 @@ def main():
     parser.add_argument('--nowear_dir2', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/glasses/refining_yaw_yaw', help='Directory for additional "no wear" images')
     parser.add_argument('--data_fraction', type=float, default=1, help='Fraction of extra data to use (0.0 to 1.0)')
     parser.add_argument('--img_size', type=int, default=384, help='Input image size (assumed square)')
+    parser.add_argument('--FDA_data', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_train_data_640', help='FDA data path')
+    parser.add_argument('--fda_beta', type=float, default=0.05, help='Relative radius of low-frequency swap for FDA (0 disables)')
+    parser.add_argument('--fda_prob', type=float, default=0.5, help='Probability of applying FDA to a training sample')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
@@ -577,7 +626,8 @@ def main():
 
     # W&B arguments
     parser.add_argument('--wandb', action='store_true', help='Use wandb or not')
-    parser.add_argument('--wandb_name', type=str, default='efficientnetv2_improved', help='wandb experiment name')
+    parser.add_argument('--project', type=str, default='efficientnetv2_FDA', help='wandb project name')
+    parser.add_argument('--wandb_name', type=str, default='FDA', help='wandb experiment name')
     
     args = parser.parse_args()
 
@@ -594,9 +644,12 @@ def main():
     for var in vars(args):
         print(f"{var}: {getattr(args, var)}")
     print("--------------------------")
-    
+
     if not args.no_confirm:
-        input("Press Enter to proceed...")
+        if sys.stdin.isatty():
+            input("Press Enter to proceed...")
+        else:
+            print("Non-interactive environment detected; skipping confirmation prompt. Use --no_confirm to suppress this message explicitly.")
     
     world_size = torch.cuda.device_count()
     if world_size > 1:
