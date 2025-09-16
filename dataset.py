@@ -11,15 +11,23 @@ class custom_dataset(data.Dataset):
         self.wear_data = wear_data
         self.no_wear_data = no_wear_data
         self.train_transform = v2.Compose([
-        v2.ToImage(),
-        v2.ToDtype(torch.float32, scale=True),
-        v2.RandomResizedCrop((img_size, img_size), scale=(0.9, 1.0), ratio=(0.95, 1.05)),
-        v2.RandomHorizontalFlip(p=0.5),
-        v2.RandomApply([v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.02)], p=0.2),
-        v2.RandomApply([v2.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5))], p=0.1),
-        v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        v2.RandomErasing(p=0.1, scale=(0.02, 0.08), ratio=(0.3, 3.3), value=0),
+            v2.ToImage(),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.RandomHorizontalFlip(p=0.5),
+            v2.RandomApply([v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.08, hue=0.01)], p=0.25),
+            v2.RandomGrayscale(p=0.05),
 
+            v2.RandomApply([
+                v2.RandomChoice([
+                    v2.RandomAffine(degrees=6, translate=(0.015, 0.015), scale=(0.97, 1.03), shear=(-2, 2)),
+                    v2.RandomPerspective(distortion_scale=0.08)
+                ])
+            ], p=0.6),
+            v2.RandomApply([v2.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.1),
+            
+            v2.Resize(size=(img_size, img_size)),
+            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            v2.RandomErasing(p=0.05, scale=(0.02, 0.05), ratio=(0.3, 3.3), value=0),
         ])
         
         self.val_transform  = v2.Compose([

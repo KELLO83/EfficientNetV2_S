@@ -84,7 +84,7 @@ class EfficientNetV2_S_improved(torch.nn.Module):
         # Fix incorrect super class reference
         super(EfficientNetV2_S_improved, self).__init__()
         self.model = timm.create_model('tf_efficientnetv2_s.in21k', pretrained=True , num_classes=num_classes)
-        set_trainable_efficientnet_v2s(self.model, unfreeze_stages=("5.14",), train_bn_affine=True, verbose=True)
+        set_trainable_efficientnet_v2s(self.model, unfreeze_stages=("5.14","5.13"), train_bn_affine=True, verbose=True)
     
 
     def forward(self, x):

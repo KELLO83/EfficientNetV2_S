@@ -9,12 +9,18 @@ from dataset import custom_dataset
 import numpy as np
 import cv2
 import logging
-import os
-from backbone.model import EfficientNetV2_S , EfficientNetV2_L
+
+from backbone.model import (
+    EfficientNetV2_S,
+    EfficientNetV2_L,
+    EfficientNetV2_S_improved,
+    build_param_groups_lrd,
+    set_trainable_efficientnet_v2s,
+)
+
 import torchinfo
 from sklearn.model_selection import train_test_split
 from utils.early_stop import EarlyStopping
-from utils.polynomialLRWarmup import PolynomialLRWarmup
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import argparse
 import torch.distributed as dist
@@ -25,6 +31,10 @@ from collections import OrderedDict
 from natsort import natsorted
 from torch.utils.data import DataLoader
 import torchvision
+import torch.nn as nn
+import math
+from typing import Optional
+
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 def setup_ddp(rank, world_size):
@@ -38,7 +48,7 @@ def cleanup_ddp():
 def wandb_init(name='None'):
     name = name
     wandb.init(
-        project='EfficientNetV2_mask',
+        project='EfficientNetV2_Improved',
         name=name,
     )
 
@@ -76,6 +86,7 @@ def data_check(loader: DataLoader, is_bgr: bool):
     cv2.destroyAllWindows()
     return
 
+
 def find_max_batch_size(model, input_shape, device):
     if 'cuda' not in str(device):
         logging.info("CUDA not found. Skipping max batch size search.")
@@ -108,7 +119,7 @@ def find_max_batch_size(model, input_shape, device):
                 raise e
         finally:
             torch.cuda.empty_cache()
-    print(f"Max batch size search completed. Maximum found 한계선 {limit}: {max_found_bs}")
+    print(f"Max batch size search completed. Maximum found limit {limit}: {max_found_bs}")
     return max_found_bs
 
 def get_model(model_name):
@@ -116,9 +127,66 @@ def get_model(model_name):
         model = EfficientNetV2_S()
     elif model_name == 'efficientnetv2_l':
         model = EfficientNetV2_L()
+    elif model_name == 'efficientnetv2_s_improved':
+        model = EfficientNetV2_S_improved()
     else:
         raise ValueError(f"Model {model_name} not recognized.")
     return model
+
+def unwrap_model(m: torch.nn.Module):
+    if isinstance(m, DDP):
+        m = m.module
+    if hasattr(m, '_orig_mod'):
+        m = m._orig_mod
+    return m
+
+def get_inner_timm(m: torch.nn.Module):
+    m = unwrap_model(m)
+    return getattr(m, 'model', m)
+
+def freeze_bn_running_stats(model: torch.nn.Module):
+    """Freeze BatchNorm running stats; keep affine trainable."""
+    for m in model.modules():
+        if isinstance(m, (nn.BatchNorm2d, nn.SyncBatchNorm)):
+            m.eval()
+
+def mixup_data(x: torch.Tensor, y: torch.Tensor, alpha: float):
+    if alpha is None or alpha <= 0.0:
+        return x, y, y, 1.0
+    lam = np.random.beta(alpha, alpha)
+    batch_size = x.size(0)
+    index = torch.randperm(batch_size, device=x.device)
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
+
+class EMA:
+    def __init__(self, model: torch.nn.Module, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {}
+        for name, p in model.named_parameters():
+            if p.requires_grad:
+                self.shadow[name] = p.detach().clone().cpu()
+        self.backup = {}
+
+    def update(self, model: torch.nn.Module):
+        for name, p in model.named_parameters():
+            if name in self.shadow and p.requires_grad:
+                new = p.detach().cpu()
+                self.shadow[name].mul_(self.decay).add_(new, alpha=1.0 - self.decay)
+
+    def apply_shadow(self, model: torch.nn.Module):
+        self.backup = {}
+        for name, p in model.named_parameters():
+            if name in self.shadow and p.requires_grad:
+                self.backup[name] = p.data.detach().clone()
+                p.data.copy_(self.shadow[name].to(p.device))
+
+    def restore(self, model: torch.nn.Module):
+        for name, p in model.named_parameters():
+            if name in self.backup:
+                p.data.copy_(self.backup[name])
+        self.backup = {}
 
 def load_extra_data(path, fraction):
     p = pathlib.Path(path)
@@ -141,6 +209,10 @@ def main_worker(rank, world_size, args):
     if rank == 0:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
+    # Ensure each rank is pinned to a unique GPU
+    if world_size > 1 and torch.cuda.is_available():
+        torch.cuda.set_device(rank)
+    
     if world_size > 1:
         setup_ddp(rank, world_size)
     
@@ -150,40 +222,57 @@ def main_worker(rank, world_size, args):
     torch.backends.cudnn.benchmark = True
     device = torch.device(f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
 
-    wear_path = pathlib.Path(args.wear_dir)
-    nowear_path = pathlib.Path(args.nowear_dir)
-
-    wear_list = list(wear_path.glob('*.jpg')) if wear_path.exists() else []
-    no_wear_list = list(nowear_path.glob('**/*.jpg')) if nowear_path.exists() else []
-
-    if args.data_fraction > 0:
-        if rank == 0:
-            logging.info(f"Loading {args.data_fraction * 100:.0f}% of extra data from {args.wear_dir2} and {args.nowear_dir2}")
-        no_wear_list.extend(load_extra_data(args.nowear_dir2, args.data_fraction))
-
-
-    wear2_path = pathlib.Path(args.wear_dir2)
-
-    wear_list.extend(list(wear2_path.glob('**/*.jpg')) if wear2_path.exists() else [])
-
-
-    if not wear_list or not no_wear_list:
-        raise ValueError("Image lists are empty. Please check data paths.")
-
+    # --- Data preparation (only on rank 0) ---
     if rank == 0:
+        wear_path = pathlib.Path(args.wear_dir)
+        nowear_path = pathlib.Path(args.nowear_dir)
+
+        wear_list = list(wear_path.glob('*.jpg')) if wear_path.exists() else []
+        no_wear_list = list(nowear_path.glob('**/*.jpg')) if nowear_path.exists() else []
+
+        if args.data_fraction > 0:
+            logging.info(f"Loading {args.data_fraction * 100:.0f}% of extra data from {args.wear_dir2} and {args.nowear_dir2}")
+            no_wear_list.extend(load_extra_data(args.nowear_dir2, args.data_fraction))
+
+        wear2_path = pathlib.Path(args.wear_dir2)
+        wear_list.extend(list(wear2_path.glob('**/*.jpg')) if wear2_path.exists() else [])
+
+        if not wear_list or not no_wear_list:
+            raise ValueError("Image lists are empty. Please check data paths.")
+
         logging.info(f"wear num : {len(wear_list)}")
         logging.info(f"no wear num : {len(no_wear_list)}")
 
-    wear_labels = [1] * len(wear_list)
-    no_wear_labels = [0] * len(no_wear_list)
+        wear_labels = [1] * len(wear_list)
+        no_wear_labels = [0] * len(no_wear_list)
 
-    all_data = wear_list + no_wear_list
-    all_labels = wear_labels + no_wear_labels
+        all_data = wear_list + no_wear_list
+        all_labels = wear_labels + no_wear_labels
 
-    train_list, val_list, train_labels, val_labels = train_test_split(
-        all_data, all_labels, test_size=0.2, random_state=42, stratify=all_labels
-    )
-    
+        train_list, val_list, train_labels, val_labels = train_test_split(
+            all_data, all_labels, test_size=0.2, random_state=42, stratify=all_labels
+        )
+        
+        # Share data lists with other ranks
+        if world_size > 1:
+            data_to_share = {
+                'train_list': train_list,
+                'val_list': val_list,
+                'train_labels': train_labels,
+                'val_labels': val_labels
+            }
+            dist.broadcast_object_list([data_to_share], src=0)
+    else:
+        # Receive data lists from rank 0
+        data_to_share = [None]
+        dist.broadcast_object_list(data_to_share, src=0)
+        data_to_share = data_to_share[0]
+        train_list = data_to_share['train_list']
+        val_list = data_to_share['val_list']
+        train_labels = data_to_share['train_labels']
+        val_labels = data_to_share['val_labels']
+
+
     train_wear = [path for path, label in zip(train_list, train_labels) if label == 1]
     train_no_wear = [path for path, label in zip(train_list, train_labels) if label == 0]
 
@@ -196,8 +285,8 @@ def main_worker(rank, world_size, args):
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank) if world_size > 1 else None
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
 
-    trainloader = data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None), pin_memory=True, num_workers=os.cpu_count()//world_size, sampler=train_sampler)
-    valloader = data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True, num_workers=os.cpu_count()//world_size, sampler=val_sampler)
+    trainloader = data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None), pin_memory=True, num_workers=4, sampler=train_sampler)
+    valloader = data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True, num_workers=4, sampler=val_sampler)
 
     # Run data_check safely under DDP (only rank 0 shows window)
 
@@ -225,10 +314,9 @@ def main_worker(rank, world_size, args):
     else:
         class_weights = None
 
-    criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
+    criterion = torch.nn.CrossEntropyLoss(weight=class_weights, label_smoothing=args.label_smoothing)
 
     model = get_model(args.model).to(device)
-    model = torch.compile(model)
 
     if args.pretrained and os.path.isfile(args.weight_path):
         logging.info(f"Loading weights from {args.weight_path}")
@@ -245,6 +333,11 @@ def main_worker(rank, world_size, args):
     if world_size > 1:
         model = DDP(model, device_ids=[rank])
 
+    # Optionally freeze BN running stats for stability across domains
+    if args.bn_freeze_stats:
+        target_model = model.module if isinstance(model, DDP) else model
+        freeze_bn_running_stats(target_model)
+
     if rank == 0 and args.wandb:
         wandb.watch(model, log='all', log_freq=100)
 
@@ -257,23 +350,41 @@ def main_worker(rank, world_size, args):
         logging.info(f"traineable params percentage: {100 * trainable_backbone_params / backbone_params:.2f}%")
         logging.info('==' * 30)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
-    #scheduler = CosineAnnealingLR(optimizer, T_max=10, eta_min=1e-6)
+    # Build optimizer (LLRD optional)
+    if args.lrd:
+        inner = get_inner_timm(model)
+        try:
+            param_groups = build_param_groups_lrd(inner)
+            optimizer = torch.optim.AdamW(param_groups, weight_decay=args.weight_decay)
+        except Exception as e:
+            if rank == 0:
+                logging.warning(f"LLRD failed, falling back to single LR: {e}")
+            optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    scheduler = PolynomialLRWarmup(
-        optimizer, warmup_iters=10, total_iters=args.epochs, power=1.0 , limit_lr = 1e-7
-    )
 
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 1e-2)
     early_stopping = EarlyStopping(patience=10, verbose=True)
 
     best_val_acc = 0.0
-    scaler = torch.amp.GradScaler()
+    # Enable GradScaler only on CUDA to avoid CPU AMP issues (new API)
+    scaler = torch.amp.GradScaler('cuda' if device.type == 'cuda' else 'cpu', enabled=(device.type == 'cuda'))
+    ema = EMA(unwrap_model(model), decay=args.ema_decay) if args.use_ema else None
     
+    if rank == 0:
+        checkpoint_dir = 'checkpoints'
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
     for epoch in range(args.epochs):
         if train_sampler:
             train_sampler.set_epoch(epoch)
-            
+
         model.train()
+        if args.bn_freeze_stats:
+            target_model = model.module if isinstance(model, DDP) else model
+            freeze_bn_running_stats(target_model)
+            
         train_loss = 0.0
         correct_train = 0
         total_train = 0
@@ -285,24 +396,37 @@ def main_worker(rank, world_size, args):
 
             optimizer.zero_grad()
             
-            with torch.amp.autocast(device_type=device.type):
-                logit = model(data_input)
-                loss = criterion(logit, label)
+            inputs, targets_a, targets_b, lam = mixup_data(data_input, label, args.mixup_alpha)
+
+            # Use autocast only when CUDA is available (safer across PyTorch versions)
+            with torch.amp.autocast(device_type=device.type, enabled=(device.type == 'cuda')):
+                logit = model(inputs)
+                if args.mixup_alpha > 0.0:
+                    loss = lam * criterion(logit, targets_a) + (1 - lam) * criterion(logit, targets_b)
+                else:
+                    loss = criterion(logit, label)
             
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            if ema is not None:
+                ema.update(unwrap_model(model))
 
             train_loss += loss.item()
             _, predicted = torch.max(logit.data, 1)
             total_train += label.size(0)
-            correct_train += (predicted == label).sum().item()
+            if args.mixup_alpha > 0.0:
+                correct_train += (lam * (predicted == targets_a).sum().item() + (1 - lam) * (predicted == targets_b).sum().item())
+            else:
+                correct_train += (predicted == label).sum().item()
             
             if rank == 0:
                 pbar_train.set_postfix({'loss': loss.item()})
 
         train_accuracy = 100 * correct_train / total_train
         
+        if ema is not None and args.ema_eval:
+            ema.apply_shadow(unwrap_model(model))
         model.eval()
         val_loss = 0.0
         correct_val = 0
@@ -313,8 +437,13 @@ def main_worker(rank, world_size, args):
                 data_input = data_input.to(device, non_blocking=True)
                 label = label.to(device, non_blocking=True)
 
-                with torch.amp.autocast(device_type=device.type):
-                    logit = model(data_input)
+                with torch.amp.autocast(device_type=device.type, enabled=(device.type == 'cuda')):
+                    if args.tta_flip:
+                        logit1 = model(data_input)
+                        logit2 = model(torch.flip(data_input, dims=[3]))
+                        logit = (logit1 + logit2) / 2.0
+                    else:
+                        logit = model(data_input)
                     loss = criterion(logit, label)
 
                 val_loss += loss.item()
@@ -325,6 +454,8 @@ def main_worker(rank, world_size, args):
                     pbar_val.set_postfix({'loss': loss.item()})
 
         val_accuracy = 100 * correct_val / total_val
+        if ema is not None and args.ema_eval:
+            ema.restore(unwrap_model(model))
         
         if rank == 0 and args.wandb:
             wandb.log({
@@ -338,16 +469,13 @@ def main_worker(rank, world_size, args):
         if rank == 0:
             logging.info(f"Epoch {epoch+1}, Train Loss: {train_loss/len(trainloader):.4f}, Train Acc: {train_accuracy:.2f}%, Val Loss: {val_loss/len(valloader):.4f}, Val Acc: {val_accuracy:.2f}%")
 
-
+            # Save periodic checkpoints
             if (epoch + 1) % 2 == 0 :
                 state_to_save = model.module.state_dict() if world_size > 1 else model.state_dict()
                 
                 cleaned_state_dict = OrderedDict()
                 for k, v in state_to_save.items():
-                    if '_orig_mod.' in k:
-                        name = k.replace('_orig_mod.', '')
-                    else:
-                        name = k
+                    name = k.replace('_orig_mod.', '') if k.startswith('_orig_mod.') else k
                     cleaned_state_dict[name] = v
                 
                 checkpoint = {
@@ -358,38 +486,30 @@ def main_worker(rank, world_size, args):
                     'best_val_acc': best_val_acc
                 }
 
-                if not os.path.exists('checkpoints'):
-                    os.makedirs('checkpoints')
-                    
-                torch.save(checkpoint, os.path.join('checkpoints' , f'{args.model}_{epoch+1}.pth'))
-                logging.info("Saved best model and optimizer state.")
-                logging.info(f"Saved checkpoint at epoch {epoch+1}.")
+                checkpoint_path = os.path.join(checkpoint_dir, f'{args.model}_epoch_{epoch+1}.pth')
+                torch.save(checkpoint, checkpoint_path)
+                logging.info(f"Saved checkpoint to {checkpoint_path}")
 
-
+            # Save best model
             if val_accuracy > best_val_acc:
                 best_val_acc = val_accuracy
-                os.makedirs('checkpoints', exist_ok=True)
-
                 state_to_save = model.module.state_dict() if world_size > 1 else model.state_dict()
                 
                 cleaned_state_dict = OrderedDict()
                 for k, v in state_to_save.items():
-                    if '_orig_mod' in k:
-                        name = k.replace('_orig_mod.', '')
-                    else:
-                        name = k
+                    name = k.replace('_orig_mod.', '') if k.startswith('_orig_mod.') else k
                     cleaned_state_dict[name] = v
                 
-
                 checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': cleaned_state_dict,
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'best_val_acc': best_val_acc
+                    'epoch': epoch,
+                    'model_state_dict': cleaned_state_dict,
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'best_val_acc': best_val_acc
                 }
-                torch.save(checkpoint, os.path.join('checkpoints','best_model.pth'))
-                logging.info("Saved best model and optimizer state.")
+                best_model_path = os.path.join(checkpoint_dir, 'best_model.pth')
+                torch.save(checkpoint, best_model_path)
+                logging.info(f"Saved best model to {best_model_path}")
 
             early_stopping(val_loss / len(valloader))
 
@@ -417,9 +537,9 @@ def main():
     parser = argparse.ArgumentParser(description='EfficientNetV2 Training')
     
     # Model arguments
-    parser.add_argument('--model', type=str, default='efficientnetv2_s', choices=['efficientnetv2_s', 'efficientnetv2_l'], help='Model type')
+    parser.add_argument('--model', type=str, default='efficientnetv2_s_improved', choices=['efficientnetv2_s', 'efficientnetv2_l', 'efficientnetv2_s_improved'], help='Model type')
     parser.add_argument('--pretrained', action='store_true', help='Use pretrained weights')
-    parser.add_argument('--weight_path', type=str, default='checkpoints/best_model.pth', help='Path to model weights')
+    parser.add_argument('--weight_path', type=str, default='checkpoints/efficientnetv2_improved/best_model.pth', help='Path to model weights')
 
     # Data arguments
     parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/마스크_원시데이터/TS1')
@@ -431,21 +551,41 @@ def main():
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')
     parser.add_argument('--find_batch_size', action='store_true', help='Find the maximum batch size before training')
     parser.add_argument('--no_confirm', action='store_true', help='Skip argument confirmation prompt')
     parser.add_argument('--data_check', action='store_true', help='Visualize a batch of data to check augmentations')
 
+    parser.add_argument('--mixup_alpha', type=float, default=0.2, help='Mixup alpha (0 disables mixup)')
+    parser.add_argument('--label_smoothing', type=float, default=0.1, help='CrossEntropy label smoothing')
+
+    # Boolean flags with default True via paired options
+    parser.add_argument('--bn_freeze_stats', dest='bn_freeze_stats', action='store_true', help='Freeze BN running stats during training')
+    parser.add_argument('--no-bn_freeze_stats', dest='bn_freeze_stats', action='store_false', help='Do not freeze BN running stats during training')
+    parser.add_argument('--lrd', dest='lrd', action='store_true', help='Use layer-wise lr decay param groups')
+    parser.add_argument('--no-lrd', dest='lrd', action='store_false', help='Disable layer-wise lr decay')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Base learning rate when not using LLRD')
+    parser.add_argument('--weight_decay', type=float, default=1e-2, help='Weight decay for AdamW')
+    parser.add_argument('--use_ema', dest='use_ema', action='store_true', help='Maintain EMA of weights')
+    parser.add_argument('--no-use_ema', dest='use_ema', action='store_false', help='Disable EMA of weights')
+    parser.add_argument('--ema_decay', type=float, default=0.999, help='EMA decay factor')
+    parser.add_argument('--ema_eval', action='store_true', help='Evaluate with EMA weights during validation')
+    parser.add_argument('--tta_flip', action='store_true', help='Enable horizontal flip TTA at validation')
+
+    # Set defaults for paired booleans
+    parser.set_defaults(bn_freeze_stats=True, lrd=True, use_ema=True)
+
     # W&B arguments
     parser.add_argument('--wandb', action='store_true', help='Use wandb or not')
-    parser.add_argument('--wandb_name', type=str, default='efficientnetv2_experiment', help='wandb experiment name')
+    parser.add_argument('--wandb_name', type=str, default='efficientnetv2_improved', help='wandb experiment name')
     
     args = parser.parse_args()
 
     if args.find_batch_size:
         print("Finding max batch size...")
         temp_model = get_model(args.model)
-        max_bs = find_max_batch_size(temp_model, input_shape=(3, 320, 320), device='cuda:0')
+        # Use the configured img_size for the batch size search
+        max_bs = find_max_batch_size(temp_model, input_shape=(3, args.img_size, args.img_size), device='cuda:0')
         if max_bs:
             print(f"Maximum possible batch size is {max_bs}. Setting batch_size to this value.")
             args.batch_size = max_bs
