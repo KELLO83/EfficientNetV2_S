@@ -39,6 +39,7 @@ class SunglassDataset(Dataset):
 
 #weight_path = 'effcientnet640_s_sunglasses/efficientnetv2_s_dann_best.pth'
 weight_path = 'checkpoints/efficientnetv2_s_dann_best.pth'
+weight_path = 'checkpoints/best_model.pth'
 # Load weights onto the CPU to avoid GPU memory issues
 weight = torch.load(weight_path, map_location='cpu')
 
@@ -72,9 +73,9 @@ for k in new_state_dict.keys():
     print(k)
 
 
-model = EfficientNetV2_S_DANN(num_classes=2, num_domains=2)
+#model = EfficientNetV2_S_DANN(num_classes=2, num_domains=2)
 # Load the cleaned state dict
-#model = EfficientNetV2_S(num_classes=2)
+model = EfficientNetV2_S(num_classes=2)
 result = model.load_state_dict(new_state_dict, strict=True)
 
 print("--- Loading Model Weights ---")
@@ -95,13 +96,15 @@ model.eval()
 transform = v2.Compose([
     v2.ToImage(),
     v2.ToDtype(torch.float32, scale=True),
-    v2.Resize(size=(640,640), antialias=True),
+    v2.Resize(size=(320,320), antialias=True),
     v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
+model = torch.compile(model)
 
 
-wear = pathlib.Path('/home/ubuntu/KOR_DATA/high_resolution_wear_hat')
+wear = pathlib.Path('/media/ubuntu/새 볼륨/dataset/034.마스크 착용 한국인 안면 이미지 데이터/01.데이터/1.Training/원천데이터/yolo_face_detection_result_1')
+#wear = pathlib.Path('/media/ubuntu/새 볼륨/dataset/034.마스크 착용 한국인 안면 이미지 데이터/01.데이터/1.Training/원천데이터/refining_yaw_yaw')
 no_wear = pathlib.Path('/home/ubuntu/KOR_DATA/high_resolution_not_wear_hat')
 
 # no_wear = pathlib.Path('/home/ubuntu/KOR_DATA/sunglass_dataset/nowear')
@@ -119,10 +122,10 @@ if not wear_files or not nowear_files:
     print(len(wear_files), len(nowear_files))
     raise ValueError("No image files found in the specified directories.")
 
-# wear_files = []
+# nowear_files = []
 
 full_dataset = SunglassDataset(wear_files=wear_files, nowear_files=nowear_files, transform=transform)
-data_loader = DataLoader(full_dataset, batch_size= 64, shuffle=False, num_workers=os.cpu_count(), pin_memory=True)
+data_loader = DataLoader(full_dataset, batch_size= 128, shuffle=False, num_workers=os.cpu_count(), pin_memory=True)
 
 tp, tn, fp, fn = 0, 0, 0, 0
 
@@ -145,7 +148,7 @@ with torch.no_grad():
         # else:
         # label_outputs, _ = model(images, alpha=0)
 
-        label_outputs  , _ = model(images)
+        label_outputs  = model(images)
         
         # --- 1. Get Predictions ---
         predicted = torch.argmax(label_outputs, dim=1)

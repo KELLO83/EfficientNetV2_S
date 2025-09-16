@@ -5,25 +5,27 @@ import cv2
 import pathlib # Added for pathlib.Path
 from typing import List, Tuple, Callable, Dict, Any # Added for type hints
 
-class Sun_glasses_Dataset(data.Dataset):
-    def __init__(self, wear_data=None, no_wear_data=None , train = True):
+class custom_dataset(data.Dataset):
+    def __init__(self, wear_data=None, no_wear_data=None , train = True , img_size =  320):
         self.train = train
         self.wear_data = wear_data
         self.no_wear_data = no_wear_data
-        self.train_transform  = v2.Compose([
-            v2.ToImage(),
-            v2.ToDtype(torch.float32 ,scale=True),
-            v2.RandomHorizontalFlip(p=0.3),
-            v2.RandomApply([v2.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1)], p=0.3),
-            v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 1.5))], p=0.3),
-            v2.Resize(size=(640, 640)),
-            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
+        self.train_transform = v2.Compose([
+        v2.ToImage(),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.RandomResizedCrop((img_size, img_size), scale=(0.9, 1.0), ratio=(0.95, 1.05)),
+        v2.RandomHorizontalFlip(p=0.5),
+        v2.RandomApply([v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.02)], p=0.2),
+        v2.RandomApply([v2.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5))], p=0.1),
+        v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        v2.RandomErasing(p=0.1, scale=(0.02, 0.08), ratio=(0.3, 3.3), value=0),
 
+        ])
+        
         self.val_transform  = v2.Compose([
             v2.ToImage(),
             v2.ToDtype(torch.float32 ,scale=True),
-            v2.Resize(size=(640, 640)),
+            v2.Resize(size=(img_size, img_size)),
             v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 

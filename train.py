@@ -5,7 +5,7 @@ from tqdm import tqdm
 import wandb
 import os
 import pathlib
-from dataset import Sun_glasses_Dataset
+from dataset import custom_dataset
 import numpy as np
 import cv2
 import logging
@@ -23,7 +23,8 @@ from torch.utils.data.distributed import DistributedSampler
 import torch.multiprocessing as mp
 from collections import OrderedDict
 from natsort import natsorted
-
+from torch.utils.data import DataLoader
+import torchvision
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 def setup_ddp(rank, world_size):
@@ -37,9 +38,43 @@ def cleanup_ddp():
 def wandb_init(name='None'):
     name = name
     wandb.init(
-        project='EfficientNetV2_hat',
+        project='EfficientNetV2_mask',
         name=name,
     )
+
+def data_check(loader: DataLoader, is_bgr: bool):
+    """
+    Visualizes a batch of images from the DataLoader to check augmentations.
+    Uses inverse ImageNet normalization to display.
+    """
+    logging.info("Fetching a batch of data to visualize...")
+    it = iter(loader)
+
+    # Inverse of Normalize(mean, std) used in dataset.py
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+    cv2.namedWindow('Data Check - Press any key to continue', cv2.WINDOW_NORMAL)
+    for images, _ in it:
+        images_unnorm = images.clone()
+        images_unnorm.mul_(std).add_(mean)
+        grid = torchvision.utils.make_grid(images_unnorm, nrow=8)
+        grid = torch.clamp(grid, 0, 1)
+
+        grid_np = grid.permute(1, 2, 0).cpu().numpy()
+        grid_np = (grid_np * 255).astype(np.uint8)
+
+        if not is_bgr:
+            grid_np = cv2.cvtColor(grid_np, cv2.COLOR_RGB2BGR)
+        
+        cv2.imshow('Data Check - Press any key to continue', grid_np)
+        key = cv2.waitKey(0)
+        if key == 27:
+            logging.info("ESC key pressed. Exiting data check.")
+            break
+
+    cv2.destroyAllWindows()
+    return
 
 def find_max_batch_size(model, input_shape, device):
     if 'cuda' not in str(device):
@@ -100,6 +135,8 @@ def load_extra_data(path, fraction):
         logging.warning(f"No image files found in the specified extra data directory: {path}")
     return selected_images
 
+    
+
 def main_worker(rank, world_size, args):
     if rank == 0:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -153,8 +190,8 @@ def main_worker(rank, world_size, args):
     val_wear = [path for path, label in zip(val_list, val_labels) if label == 1]
     val_no_wear = [path for path, label in zip(val_list, val_labels) if label == 0]
 
-    train_dataset = Sun_glasses_Dataset(wear_data=train_wear, no_wear_data=train_no_wear)
-    val_dataset = Sun_glasses_Dataset(wear_data=val_wear, no_wear_data=val_no_wear , train=False)
+    train_dataset = custom_dataset(wear_data=train_wear, no_wear_data=train_no_wear , img_size= args.img_size , train=True)
+    val_dataset = custom_dataset(wear_data=val_wear, no_wear_data=val_no_wear , train=False , img_size= args.img_size)
 
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank) if world_size > 1 else None
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
@@ -162,6 +199,13 @@ def main_worker(rank, world_size, args):
     trainloader = data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None), pin_memory=True, num_workers=os.cpu_count()//world_size, sampler=train_sampler)
     valloader = data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True, num_workers=os.cpu_count()//world_size, sampler=val_sampler)
 
+    # Run data_check safely under DDP (only rank 0 shows window)
+
+    if args.data_check and rank == 0:
+        data_check(trainloader, is_bgr=False)
+        if world_size > 1:
+            dist.barrier()
+        
     if len(train_no_wear) > 0 and len(train_wear) > 0:
         count_no_wear = len(train_no_wear)
         count_wear = len(train_wear)
@@ -366,6 +410,9 @@ def main_worker(rank, world_size, args):
     if world_size > 1:
         cleanup_ddp()
 
+
+
+
 def main():
     parser = argparse.ArgumentParser(description='EfficientNetV2 Training')
     
@@ -375,17 +422,19 @@ def main():
     parser.add_argument('--weight_path', type=str, default='checkpoints/best_model.pth', help='Path to model weights')
 
     # Data arguments
-    parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/cap_data_recollect2')
-    parser.add_argument('--wear_dir2' , type=str , default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/cap_data_recollect1')
+    parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/마스크_원시데이터/TS1')
+    parser.add_argument('--wear_dir2' , type=str , default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/마스크_원시데이터/TS2')
     parser.add_argument('--nowear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/neckslice/refining_yaw_yaw', help='Directory for "no wear" images')
     parser.add_argument('--nowear_dir2', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/glasses/refining_yaw_yaw', help='Directory for additional "no wear" images')
     parser.add_argument('--data_fraction', type=float, default=1, help='Fraction of extra data to use (0.0 to 1.0)')
+    parser.add_argument('--img_size', type=int, default=384, help='Input image size (assumed square)')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size for training')
     parser.add_argument('--find_batch_size', action='store_true', help='Find the maximum batch size before training')
     parser.add_argument('--no_confirm', action='store_true', help='Skip argument confirmation prompt')
+    parser.add_argument('--data_check', action='store_true', help='Visualize a batch of data to check augmentations')
 
     # W&B arguments
     parser.add_argument('--wandb', action='store_true', help='Use wandb or not')

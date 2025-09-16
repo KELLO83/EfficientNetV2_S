@@ -3,6 +3,95 @@ import torch
 import torch.nn as nn
 from torch.autograd import Function
 
+
+def build_param_groups_lrd(model: nn.Module):
+    """Build parameter groups with layer-wise decayed LRs for EfficientNetV2-S.
+
+    Priority order: head > stage5 > stage4 > (BN affine global) > other
+    """
+    head, s5, s4, bn_affine, other = [], [], [], [], []
+    seen = set()
+
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        pid = id(p)
+
+        if any(k in name for k in ["classifier", "conv_head"]) or name.startswith("bn2"):
+            head.append(p)
+            seen.add(pid)
+            continue
+        if name.startswith("blocks.5."):
+            s5.append(p)
+            seen.add(pid)
+            continue
+
+        if ("bn" in name) and (name.endswith("weight") or name.endswith("bias")) and pid not in seen:
+            bn_affine.append(p)
+            seen.add(pid)
+            continue
+
+        other.append(p)
+
+    groups = []
+    if head:
+        groups.append({"params": head, "lr": 1e-3})
+    if s5:
+        groups.append({"params": s5, "lr": 3e-4})
+    if s4:
+        groups.append({"params": s4, "lr": 2e-4})
+    if bn_affine:
+        groups.append({"params": bn_affine, "lr": 1e-4})
+    if other:
+        groups.append({"params": other, "lr": 1e-4})
+
+    return groups
+
+
+
+def set_trainable_efficientnet_v2s(model: nn.Module, unfreeze_stages, train_bn_affine: bool = True, verbose: bool = True):
+    
+    for _, p in model.named_parameters():
+        p.requires_grad = False
+
+    train_prefixes = ["classifier", "conv_head", "bn2"]
+    for s in unfreeze_stages:
+        train_prefixes.append(f"blocks.{s}")
+
+    for name, p in model.named_parameters():
+        if any(name.startswith(pref) for pref in train_prefixes):
+            p.requires_grad = True
+
+    if train_bn_affine:
+        for m in model.modules():
+            if isinstance(m, (nn.BatchNorm2d, nn.SyncBatchNorm)):
+                if m.weight is not None:
+                    m.weight.requires_grad = True
+                if m.bias is not None:
+                    m.bias.requires_grad = True
+
+    if verbose:
+        total = sum(p.numel() for p in model.parameters())
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Trainable params: {trainable:,} / {total:,} ({100.0*trainable/total:.2f}%)")
+
+    return model
+
+
+
+class EfficientNetV2_S_improved(torch.nn.Module):
+    def __init__(self , num_classes = 2):
+        # Fix incorrect super class reference
+        super(EfficientNetV2_S_improved, self).__init__()
+        self.model = timm.create_model('tf_efficientnetv2_s.in21k', pretrained=True , num_classes=num_classes)
+        set_trainable_efficientnet_v2s(self.model, unfreeze_stages=("5.14",), train_bn_affine=True, verbose=True)
+    
+
+    def forward(self, x):
+        x = self.model(x)
+        return x
+    
+
 class EfficientNetV2_S(torch.nn.Module):
     def __init__(self , num_classes = 2):
         super(EfficientNetV2_S, self).__init__()
@@ -45,7 +134,6 @@ class EfficientNetV2_S(torch.nn.Module):
         x = self.model(x)
         return x
     
-
 class EfficientNetV2_L(torch.nn.Module):
     def __init__(self , num_classes = 2):
         super(EfficientNetV2_L, self).__init__()
@@ -93,8 +181,6 @@ class EfficientNetV2_L(torch.nn.Module):
         x = self.model(x)
         return x
 
-# --- Domain-Adversarial Training Components ---
-
 class GradientReversalFunction(Function):
     """
     Gradient Reversal Layer from:
@@ -110,9 +196,6 @@ class GradientReversalFunction(Function):
         output = grad_output.neg() * ctx.alpha
         return output, None
 
-"""
-adversarial domain adaptation model
-"""
 class EfficientNetV2_S_DANN(nn.Module):
     """
     Domain-Adversarial Neural Network (DANN) implementation for EfficientNetV2-S.
@@ -132,11 +215,8 @@ class EfficientNetV2_S_DANN(nn.Module):
         # --- Label Predictor ---
         self.label_predictor = nn.Linear(num_features, num_classes)
 
-        for name , param in self.feature_extractor.named_parameters():
-            if name.startswith('classifier') or name.startswith('conv_head') or name.startswith('bn2') or name.startswith('blocks.5.14') :
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+        # Align trainable policy with EfficientNetV2-S: head + blocks.5 + blocks.4 + BN affine
+        set_trainable_efficientnet_v2s(self.feature_extractor, unfreeze_stages=("5.14",), train_bn_affine=True, verbose=False)
         
         # --- Domain Classifier ---
         self.domain_classifier = nn.Sequential(
@@ -192,28 +272,14 @@ class EfficientNetV2_S_DANN(nn.Module):
 
 
 
+
+
 if __name__ == "__main__":
-    # model = EfficientNetV2_S()
-    # print(model)
-    # print("========================================")
-
-    # print("\n--- Final requires_grad status outside __init__ ---")
-    # for name, param in model.named_parameters():
-    #     print(f"name : {name} , requires_grad : {param.requires_grad}")
 
 
-    model = EfficientNetV2_L()
-    #print(model)
-    import torchinfo
 
-    torchinfo.summary(
-        model=model,
-        input_size=(1, 3, 640, 640),
-        verbose=True,
-        col_names=["input_size", "output_size", "trainable"],
-        row_settings=["depth"],
-        mode='eval'
-    )
+
+    model = EfficientNetV2_S_improved()
 
     backbone_params = sum(p.numel() for p in model.parameters())
     trainable_backbone_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -221,3 +287,5 @@ if __name__ == "__main__":
     print(f"Model trainable params: {trainable_backbone_params:,}")
     print(f"traineable params percentage: {100 * trainable_backbone_params / backbone_params:.2f}%")
     print('==' * 30)
+
+
