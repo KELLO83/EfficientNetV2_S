@@ -34,7 +34,7 @@ from torch.utils.data import DataLoader
 import torchvision
 import torch.nn as nn
 import math
-from typing import Optional, List
+from typing import Optional
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
@@ -233,6 +233,7 @@ def load_extra_data(path, fraction):
         logging.warning(f"No image files found in the specified extra data directory: {path}")
     return selected_images
 
+
 def collect_image_paths(path: str):
     """Collect image files (jpg/png/jpeg/bmp) recursively from a directory."""
     p = pathlib.Path(path)
@@ -251,49 +252,6 @@ def collect_image_paths(path: str):
         logging.warning(f"No image files found in the specified FDA directory: {path}")
     return image_list
 
-
-def gather_paths(*dirs: str) -> List[pathlib.Path]:
-    paths: List[pathlib.Path] = []
-    for d in dirs:
-        if not d:
-            continue
-        path = pathlib.Path(d)
-        if not path.exists():
-            logging.warning(f"Data directory not found: {d}")
-            continue
-        paths.extend(natsorted([p for p in path.rglob('*.jpg')]))
-    return paths
-
-
-def prepare_samples(args):
-    """Prepares and splits the dataset, with oversampling for 'wear' domains."""
-
-    wear_list = gather_paths(args.wear_dir, args.wear_dir2)
-    no_wear_list = gather_paths(args.nowear_dir, args.nowear_dir2)
-
-
-    # The rest of the function remains the same
-    fda_images = collect_image_paths(args.FDA_data) if args.FDA_data else []
-    if fda_images:
-        logging.info(f"Loaded {len(fda_images)} FDA reference images from {args.FDA_data}")
-
-    if not wear_list or not no_wear_list:
-        raise ValueError("Image lists are empty. Please check data paths.")
-
-    logging.info(f"wear num : {len(wear_list)}")
-    logging.info(f"no wear num : {len(no_wear_list)}")
-
-    wear_labels = [1] * len(wear_list)
-    no_wear_labels = [0] * len(no_wear_list)
-
-    all_data = wear_list + no_wear_list
-    all_labels = wear_labels + no_wear_labels
-
-    train_list, val_list, train_labels, val_labels = train_test_split(
-        all_data, all_labels, test_size=0.2, random_state=42, stratify=all_labels
-    )
-    
-    return train_list, val_list, train_labels, val_labels, fda_images
     
 
 def main_worker(rank, world_size, args):
@@ -315,7 +273,38 @@ def main_worker(rank, world_size, args):
 
     # --- Data preparation (only on rank 0) ---
     if rank == 0:
-        train_list, val_list, train_labels, val_labels, fda_images = prepare_samples(args)
+        wear_path = pathlib.Path(args.wear_dir)
+        nowear_path = pathlib.Path(args.nowear_dir)
+
+        wear_list = list(wear_path.glob('*.jpg')) if wear_path.exists() else []
+        no_wear_list = list(nowear_path.glob('**/*.jpg')) if nowear_path.exists() else []
+
+        fda_images = collect_image_paths(args.FDA_data) if args.FDA_data else []
+        if fda_images:
+            logging.info(f"Loaded {len(fda_images)} FDA reference images from {args.FDA_data}")
+
+        if args.data_fraction > 0:
+            logging.info(f"Loading {args.data_fraction * 100:.0f}% of extra data from {args.wear_dir2} and {args.nowear_dir2}")
+            no_wear_list.extend(load_extra_data(args.nowear_dir2, args.data_fraction))
+
+        wear2_path = pathlib.Path(args.wear_dir2)
+        wear_list.extend(list(wear2_path.glob('**/*.jpg')) if wear2_path.exists() else [])
+
+        if not wear_list or not no_wear_list:
+            raise ValueError("Image lists are empty. Please check data paths.")
+
+        logging.info(f"wear num : {len(wear_list)}")
+        logging.info(f"no wear num : {len(no_wear_list)}")
+
+        wear_labels = [1] * len(wear_list)
+        no_wear_labels = [0] * len(no_wear_list)
+
+        all_data = wear_list + no_wear_list
+        all_labels = wear_labels + no_wear_labels
+
+        train_list, val_list, train_labels, val_labels = train_test_split(
+            all_data, all_labels, test_size=0.2, random_state=42, stratify=all_labels
+        )
         
         # Share data lists with other ranks
         if world_size > 1:
@@ -459,7 +448,7 @@ def main_worker(rank, world_size, args):
     ema = EMA(unwrap_model(model), decay=args.ema_decay) if args.use_ema else None
     
     if rank == 0:
-        checkpoint_dir = 'checkpoints'
+        checkpoint_dir = os.path.join('checkpoints', args.model)
         os.makedirs(checkpoint_dir, exist_ok=True)
 
     for epoch in range(args.epochs):
@@ -662,17 +651,15 @@ def main():
     parser.add_argument('--weight_path', type=str, default='effcientnet_s_mask_384/best_model.pth', help='Path to model weights')
 
     # Data arguments
-    parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/sunglass/refining_yaw_yaw')
-    parser.add_argument('--wear_dir2' , type=str , default='')
+    parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/마스크_원시데이터/TS1')
+    parser.add_argument('--wear_dir2' , type=str , default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/마스크_원시데이터/TS2')
     parser.add_argument('--nowear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/neckslice/refining_yaw_yaw', help='Directory for "no wear" images')
     parser.add_argument('--nowear_dir2', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/glasses/refining_yaw_yaw', help='Directory for additional "no wear" images')
-    parser.add_argument('--fraction' ,type=float , default=1 , help='Fraction of nowear_dir2 to use (0.0 to 1.0)')
-
-
+    parser.add_argument('--data_fraction', type=float, default=1, help='Fraction of extra data to use (0.0 to 1.0)')
+    parser.add_argument('--img_size', type=int, default=384, help='Input image size (assumed square)')
     parser.add_argument('--FDA_data', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_train_data_640', help='FDA data path')
     parser.add_argument('--fda_beta', type=float, default=0.05, help='Relative radius of low-frequency swap for FDA (0 disables)')
     parser.add_argument('--fda_prob', type=float, default=0.5, help='Probability of applying FDA to a training sample')
-    parser.add_argument('--img_size', type=int, default=384, help='Input image size (assumed square)')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')

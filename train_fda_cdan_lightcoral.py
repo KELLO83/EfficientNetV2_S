@@ -3,6 +3,7 @@ import logging
 import os
 import pathlib
 import random
+import math
 import sys
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
@@ -17,6 +18,7 @@ from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils import data
+from torch.utils.data import Sampler
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
@@ -430,11 +432,221 @@ def gather_paths(*dirs: str) -> List[pathlib.Path]:
     return paths
 
 
+def gather_fractional_paths(path: str, fraction: float) -> List[pathlib.Path]:
+    if not path:
+        return []
+
+    fraction = max(0.0, min(1.0, fraction))
+    base_path = pathlib.Path(path)
+    if not base_path.exists():
+        logging.warning(f"Data directory not found: {path}")
+        return []
+
+    if fraction >= 1.0:
+        return gather_paths(path)
+
+    subfolders = natsorted([f for f in base_path.iterdir() if f.is_dir()])
+    if subfolders:
+        if fraction <= 0:
+            return []
+        num_to_use = max(1, int(math.ceil(len(subfolders) * fraction)))
+        selected = subfolders[:num_to_use]
+        images: List[pathlib.Path] = []
+        for folder in selected:
+            images.extend(natsorted([p for p in folder.rglob('*.jpg')]))
+        if not images:
+            logging.warning(f"No images found in selected subfolders of {path}")
+        else:
+            logging.info(f"Using {len(selected)}/{len(subfolders)} subfolders from {path} (fraction={fraction:.2f})")
+        return images
+
+    images = natsorted([p for p in base_path.rglob('*.jpg')])
+    if not images:
+        logging.warning(f"No images found in directory: {path}")
+        return []
+    if fraction <= 0:
+        return []
+    num_images = max(1, int(math.ceil(len(images) * fraction)))
+    selected_images = images[:num_images]
+    logging.info(f"Using {len(selected_images)}/{len(images)} images from {path} (fraction={fraction:.2f})")
+    return selected_images
+
+
+def load_extra_data(path, fraction):
+    p = pathlib.Path(path)
+    if not p.exists():
+        logging.warning(f"Extra data path not found: {path}")
+        return []
+    subfolders = natsorted([f for f in p.iterdir() if f.is_dir()])
+    num_folders_to_use = int(len(subfolders) * fraction)
+    selected_folders = subfolders[:num_folders_to_use]
+    selected_images = []
+    for folder in selected_folders:
+        selected_images.extend(natsorted(list(folder.glob('*.jpg'))))
+    if not selected_images:
+        logging.warning(f"No image files found in the specified extra data directory: {path}")
+    return selected_images
+
+
+class TargetBalancedSampler(Sampler[int]):
+    def __init__(
+        self,
+        dataset: CDANFDADataset,
+        batch_size: int,
+        min_target_ratio: float,
+        num_replicas: int = 1,
+        rank: int = 0,
+        shuffle: bool = True,
+        drop_last: bool = False,
+        seed: int = 0,
+    ):
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.min_target_ratio = max(0.0, min(1.0, float(min_target_ratio)))
+        self.num_replicas = max(1, num_replicas)
+        self.rank = max(0, rank)
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        self.seed = seed
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
+
+    def _split_indices(self, indices: List[int], generator: Optional[random.Random], shuffle: bool) -> List[int]:
+        if not indices:
+            return []
+        local = list(indices)
+        if shuffle and generator is not None:
+            generator.shuffle(local)
+        total_size = int(math.ceil(len(local) / self.num_replicas)) * self.num_replicas
+        if total_size > len(local):
+            local = local + local[: total_size - len(local)]
+        return local[self.rank:total_size:self.num_replicas]
+
+    def _prepare_pools(self, generator: random.Random, shuffle: bool) -> Tuple[List[int], List[int]]:
+        source_indices = [idx for idx, sample in enumerate(self.dataset.samples) if sample.domain_label == 0]
+        target_indices = [idx for idx, sample in enumerate(self.dataset.samples) if sample.domain_label == 1]
+
+        source_rank = self._split_indices(source_indices, generator, shuffle)
+        target_rank = self._split_indices(target_indices, generator, shuffle)
+
+        return source_rank, target_rank
+
+    def __len__(self) -> int:
+        generator = random.Random(self.seed)
+        source_rank, target_rank = self._prepare_pools(generator, shuffle=False)
+        total = len(source_rank) + len(target_rank)
+        if self.drop_last:
+            num_batches = total // self.batch_size
+            return num_batches * self.batch_size
+        if total == 0:
+            return 0
+
+        target_per_batch = int(math.ceil(self.batch_size * self.min_target_ratio)) if self.min_target_ratio > 0 and len(target_rank) > 0 else 0
+        target_per_batch = min(target_per_batch, self.batch_size)
+        if not source_rank:
+            target_per_batch = self.batch_size if target_rank else 0
+        source_per_batch = self.batch_size - target_per_batch if source_rank else 0
+
+        base_batches = int(math.ceil(total / self.batch_size))
+        source_batches = int(math.ceil(len(source_rank) / max(1, source_per_batch))) if source_per_batch > 0 else 0
+        target_batches = int(math.ceil(len(target_rank) / max(1, target_per_batch))) if target_per_batch > 0 else 0
+        num_batches = max(base_batches, source_batches, target_batches, 1)
+        return num_batches * self.batch_size
+
+    def __iter__(self):
+        generator = random.Random(self.seed + self.epoch)
+        source_rank, target_rank = self._prepare_pools(generator, shuffle=self.shuffle)
+
+        total = len(source_rank) + len(target_rank)
+        if total == 0:
+            return iter([])
+
+        has_source = len(source_rank) > 0
+        has_target = len(target_rank) > 0
+
+        target_per_batch = 0
+        if has_target and self.min_target_ratio > 0.0:
+            target_per_batch = int(math.ceil(self.batch_size * self.min_target_ratio))
+        target_per_batch = min(target_per_batch, self.batch_size)
+
+        if not has_source:
+            target_per_batch = self.batch_size if has_target else 0
+
+        source_per_batch = self.batch_size - target_per_batch if has_source else 0
+
+        if self.drop_last:
+            num_batches = (len(source_rank) + len(target_rank)) // self.batch_size
+        else:
+            base_batches = int(math.ceil((len(source_rank) + len(target_rank)) / self.batch_size))
+            source_batches = int(math.ceil(len(source_rank) / max(1, source_per_batch))) if source_per_batch > 0 else 0
+            target_batches = int(math.ceil(len(target_rank) / max(1, target_per_batch))) if target_per_batch > 0 else 0
+            candidates = [b for b in (base_batches, source_batches, target_batches) if b > 0]
+            num_batches = max(candidates) if candidates else (1 if has_source or has_target else 0)
+
+        source_pool = list(source_rank)
+        target_pool = list(target_rank)
+        source_base = list(source_rank)
+        target_base = list(target_rank)
+        source_pos = 0
+        target_pos = 0
+
+        def draw(pool: List[int], base: List[int], pos: int, needed: int) -> Tuple[List[int], List[int], int]:
+            if needed <= 0 or not base:
+                return [], pool, pos
+            result: List[int] = []
+            current_pool = pool
+            current_pos = pos
+            while len(result) < needed:
+                if current_pos >= len(current_pool):
+                    current_pool = list(base)
+                    if self.shuffle:
+                        generator.shuffle(current_pool)
+                    current_pos = 0
+                take = min(needed - len(result), len(current_pool) - current_pos)
+                result.extend(current_pool[current_pos:current_pos + take])
+                current_pos += take
+            return result, current_pool, current_pos
+
+        indices: List[int] = []
+        produced_batches = 0
+        while produced_batches < num_batches:
+            batch: List[int] = []
+            tgt_items, target_pool, target_pos = draw(target_pool, target_base, target_pos, target_per_batch)
+            batch.extend(tgt_items)
+
+            remaining = self.batch_size - len(batch)
+            src_items, source_pool, source_pos = draw(source_pool, source_base, source_pos, remaining)
+            batch.extend(src_items)
+
+            if self.drop_last and len(batch) < self.batch_size:
+                break
+
+            if len(batch) < self.batch_size:
+                # fill remaining slots with whichever pool is available to keep batch size
+                refill_needed = self.batch_size - len(batch)
+                filler_items, source_pool, source_pos = draw(source_pool, source_base, source_pos, refill_needed)
+                if not filler_items and target_per_batch < self.batch_size:
+                    filler_items, target_pool, target_pos = draw(target_pool, target_base, target_pos, refill_needed)
+                batch.extend(filler_items)
+
+            indices.extend(batch[:self.batch_size])
+            produced_batches += 1
+
+        return iter(indices)
+
 def prepare_samples(args) -> Tuple[List[Sample], List[Sample], List[pathlib.Path], List[int]]:
     source_wear = gather_paths(args.source_wear_dir, args.source_wear_dir2)
     source_nowear = gather_paths(args.source_nowear_dir, args.source_nowear_dir2)
-    target_nowear = gather_paths(args.target_nowear_dir, args.target_nowear_dir2)
-    target_wear = gather_paths(args.target_wear_dir , args.target_wear_dir2)
+
+    target_nowear = []
+    target_nowear.extend(gather_fractional_paths(args.target_nowear_dir, args.fraction))
+
+    target_wear = []
+    target_wear.extend(gather_fractional_paths(args.target_wear_dir, args.fraction))
 
     if not source_wear or not source_nowear:
         raise ValueError("Source wear/nowear data not found. Check directory paths.")
@@ -548,10 +760,30 @@ def main_worker(rank: int, world_size: int, args):
         fda_prob=0.0,
     )
 
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank) if world_size > 1 else None
+    train_sampler = None
+    if args.target_min_ratio > 0.0:
+        train_sampler = TargetBalancedSampler(
+            dataset=train_dataset,
+            batch_size=args.batch_size,
+            min_target_ratio=args.target_min_ratio,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+            drop_last=False,
+            seed=args.seed,
+        )
+    else:
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank) if world_size > 1 else None
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
 
-    trainloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None), num_workers=4, pin_memory=True, sampler=train_sampler)
+    trainloader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=(train_sampler is None),
+        num_workers=4,
+        pin_memory=True,
+        sampler=train_sampler,
+    )
     valloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True, sampler=val_sampler)
 
     criterion_cls = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing, reduction='none')
@@ -823,9 +1055,11 @@ def main():
     parser.add_argument('--source_nowear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/neckslice/refining_yaw_yaw')
     parser.add_argument('--source_nowear_dir2', type=str, default='')
     parser.add_argument('--target_nowear_dir', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_not_wear_hat')
-    parser.add_argument('--target_nowear_dir2', type=str, default='')
     parser.add_argument('--target_wear_dir', type=str, default='')
-    parser.add_argument('--target_wear_dir2', type=str, default='')
+
+    parser.add_argument('--fraction',type=float, default=0.2, help='Fraction of source data to use (0-1]')
+    parser.add_argument('--target_min_ratio', type=float, default=0.25, help='Minimum fraction of target-domain samples per training batch (0-1]')
+
 
     parser.add_argument('--img_size', type=int, default=384)
     parser.add_argument('--batch_size', type=int, default=8)
@@ -833,6 +1067,7 @@ def main():
     parser.add_argument('--val_split', type=float, default=0.2)
     parser.add_argument('--label_smoothing', type=float, default=0.1)
     parser.add_argument('--mixup_alpha', type=float, default=0.0)
+    parser.add_argument('--seed', type=int, default=42)
 
     parser.add_argument('--fda_beta', type=float, default=0.05)
     parser.add_argument('--fda_prob', type=float, default=0.25)
@@ -841,7 +1076,7 @@ def main():
     parser.add_argument('--synthetic_target_force_prob', type=float, default=1.0, help='Probability to apply FDA when force_fda flag is set')
     parser.add_argument('--FDA_data', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_train_data_640')
 
-    parser.add_argument('--domain_lambda', type=float, default=0.05, help='Weight for domain adversarial loss when using domain lambda 1.0')
+    parser.add_argument('--domain_lambda', type=float, default=0.0, help='Weight for domain adversarial loss (set >0 to enable CDAN)')
     parser.add_argument('--domain_hidden_dim', type=int, default=1024, help='Hidden dimension of CDAN domain classifier')
     parser.add_argument('--domain_weight_real', type=float, default=1.0, help='Weight for domain loss on classes observed in real target data')
     parser.add_argument('--domain_weight_synth', type=float, default=0.3, help='Weight for domain loss when relying on synthetic target samples')
@@ -865,7 +1100,7 @@ def main():
 
     parser.add_argument('--pretrained', action='store_true')
     parser.add_argument('--weight_path', type=str, default='checkpoints/convnext_v2_tiny_best.pth')
-    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints/cdan_light_coral')
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
 
     parser.add_argument('--wandb', action='store_true')
     parser.add_argument('--project', type=str, default='ConvNeXtV2_FDA_CDAN')
@@ -873,18 +1108,18 @@ def main():
 
     parser.add_argument('--no_confirm', action='store_true')
 
-    parser.set_defaults(
-        domain_lambda=0.0,
-        use_groupdro=True,
-        coral_use_synth_fallback=True,
-    )
-
-    # # 타켓도메인 착용 / 미착용 존재할떄
     # parser.set_defaults(
-    #      domain_lambda=0.05,   # CDAN 가중치
-    #      use_groupdro=True,
-    #      coral_use_synth_fallback=False,  # 합성 fallback 필요 없음
-    #  )
+    #     domain_lambda=0.0,
+    #     use_groupdro=True,
+    #     coral_use_synth_fallback=True,
+    # )
+
+    # 타켓도메인 착용 / 미착용 존재할떄
+    parser.set_defaults(
+         domain_lambda=0.05,   # CDAN 가중치
+         use_groupdro=True,
+         coral_use_synth_fallback=False,  # 합성 fallback 필요 없음
+     )
 
     args = parser.parse_args()
 
