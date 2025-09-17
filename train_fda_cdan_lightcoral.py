@@ -816,7 +816,7 @@ def main_worker(rank: int, world_size: int, args):
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 1e-2)
 
     early_stopping = EarlyStopping(patience=args.early_stop_patience, verbose=(rank == 0), delta=args.early_stop_delta)
-    scaler = torch.amp.GradScaler(device_type=device.type, enabled=(device.type == 'cuda'))
+    scaler = torch.amp.GradScaler('cuda' if device.type == 'cuda' else 'cpu', enabled=(device.type == 'cuda'))
 
     best_val_loss = float('inf')
     num_groupdro_domains = 2 + (1 if args.groupdro_split_synth else 0)
@@ -912,6 +912,7 @@ def main_worker(rank: int, world_size: int, args):
 
             if rank == 0:
                 postfix = {
+                    'Loss': loss.item(),
                     'L_cls': cls_loss.item(),
                     'L_dom': dom_loss.item(),
                     'L_coral': coral_loss.item(),
@@ -1050,19 +1051,19 @@ def main():
     
     parser.add_argument('--num_classes', type=int, default=2, help='Number of classes for classification')
 
-    parser.add_argument('--source_wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/마스크_원시데이터/TS1')
-    parser.add_argument('--source_wear_dir2', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/마스크_원시데이터/TS2')
+    parser.add_argument('--source_wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/cap_data_recollect1')
+    parser.add_argument('--source_wear_dir2', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/cap_data_recollect2')
     parser.add_argument('--source_nowear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/neckslice/refining_yaw_yaw')
-    parser.add_argument('--source_nowear_dir2', type=str, default='')
+    parser.add_argument('--source_nowear_dir2', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/glasses/refining_yaw_yaw')
     parser.add_argument('--target_nowear_dir', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_not_wear_hat')
-    parser.add_argument('--target_wear_dir', type=str, default='')
+    parser.add_argument('--target_wear_dir', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_hat_wear')
 
     parser.add_argument('--fraction',type=float, default=0.2, help='Fraction of source data to use (0-1]')
     parser.add_argument('--target_min_ratio', type=float, default=0.25, help='Minimum fraction of target-domain samples per training batch (0-1]')
 
 
     parser.add_argument('--img_size', type=int, default=384)
-    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--val_split', type=float, default=0.2)
     parser.add_argument('--label_smoothing', type=float, default=0.1)
@@ -1079,7 +1080,7 @@ def main():
     parser.add_argument('--domain_lambda', type=float, default=0.0, help='Weight for domain adversarial loss (set >0 to enable CDAN)')
     parser.add_argument('--domain_hidden_dim', type=int, default=1024, help='Hidden dimension of CDAN domain classifier')
     parser.add_argument('--domain_weight_real', type=float, default=1.0, help='Weight for domain loss on classes observed in real target data')
-    parser.add_argument('--domain_weight_synth', type=float, default=0.3, help='Weight for domain loss when relying on synthetic target samples')
+    parser.add_argument('--domain_weight_synth', type=float, default=0.2, help='Weight for domain loss when relying on synthetic target samples')
 
     parser.add_argument('--light_coral_dim', type=int, default=128, help='Projection dimension for Light CORAL')
     parser.add_argument('--light_coral_trainable', action='store_true', help='Allow Light CORAL projector weights to be trainable')
@@ -1093,7 +1094,7 @@ def main():
     parser.add_argument('--groupdro_eta', type=float, default=0.1, help='Learning rate for GroupDRO weight updates')
     parser.add_argument('--groupdro_split_synth', action='store_true', help='Treat synthetic target samples as a separate GroupDRO domain')
 
-    parser.add_argument('--lr', type=float, default=5e-5)
+    parser.add_argument('--lr', type=float, default=5e-3)
     parser.add_argument('--weight_decay', type=float, default=1e-2)
     parser.add_argument('--early_stop_patience', type=int, default=10)
     parser.add_argument('--early_stop_delta', type=float, default=1e-3)
@@ -1116,11 +1117,13 @@ def main():
 
     # 타켓도메인 착용 / 미착용 존재할떄
     parser.set_defaults(
-         domain_lambda=0.05,   # CDAN 가중치
-         use_groupdro=True,
-         coral_use_synth_fallback=False,  # 합성 fallback 필요 없음
-     )
-
+        domain_lambda=0.05,          # CDAN 가중치
+        use_groupdro=True,
+        coral_use_synth_fallback=False,  # 실타깃 있으니 합성 제외
+        synthetic_target_wear_multiplier=0,  # 합성 착용 샘플 생성 안 함
+        groupdro_split_synth=False,   # 합성분기 필요 없으니 꺼두기
+    )
+    
     args = parser.parse_args()
 
     if not args.no_confirm:
