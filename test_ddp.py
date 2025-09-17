@@ -62,11 +62,22 @@ def main_worker(rank, world_size, args):
     weight_path = args.weights
     weight = torch.load(weight_path, map_location='cpu')
 
-    try:
-        if weight['model_state_dict'] :
+    if isinstance(weight, dict):
+        if args.model == 'convNextv2_tiny' and 'backbone_state_dict' in weight:
+            weight = weight['backbone_state_dict']
+        elif 'model_state_dict' in weight:
             weight = weight['model_state_dict']
-    except:
-        pass
+
+    if args.model == 's_dann':
+        model = EfficientNetV2_S_DANN(num_classes=2, num_domains=2)
+    elif args.model == 'l':
+        model = EfficientNetV2_L(num_classes=2)
+    elif args.model == 'convNextv2_tiny':
+        model = ConvNext_V2_Tiny(num_classes=2)
+    else:
+        model = EfficientNetV2_S(num_classes=2)
+
+    model_key_set = set(model.state_dict().keys())
 
     if main_process:
         print("--- Keys from loaded weights ---")
@@ -74,30 +85,54 @@ def main_worker(rank, world_size, args):
             print(k)
         print("---------------------------------")
 
+    def map_key_to_model(key: str):
+        key = key.lstrip('.')
+        if key.startswith('_orig_mod.'):
+            key = key[len('_orig_mod.') :]
+
+        if key in model_key_set:
+            return key
+
+        parts = key.split('.')
+        for i in range(1, len(parts)):
+            candidate = '.'.join(parts[i:])
+            if candidate in model_key_set:
+                return candidate
+
+        if not key.startswith('model.'):
+            candidate = f'model.{key}'
+            if candidate in model_key_set:
+                return candidate
+
+        return None
+
     new_state_dict = OrderedDict()
-    for k, v in weight.items():
-        if k.startswith('_orig_mod'):
-            name = k.replace('_orig_mod.', '')
-            new_state_dict[name] = v
-        else:
-            new_state_dict[k] = v
+    replaced_keys = {}
+    skipped_keys = []
+    for raw_key, tensor in weight.items():
+        mapped_key = map_key_to_model(raw_key)
+        if mapped_key is None:
+            skipped_keys.append(raw_key)
+            continue
+
+        new_state_dict[mapped_key] = tensor
+        if raw_key != mapped_key:
+            replaced_keys[raw_key] = mapped_key
 
     if main_process:
-        print("--- Keys after cleaning ---")
-        for k in new_state_dict.keys():
-            print(k)
+        print("--- Key remapping summary ---")
+        if replaced_keys:
+            for src, dst in replaced_keys.items():
+                print(f"{src} -> {dst}")
+        else:
+            print("No key remapping needed.")
+        if skipped_keys:
+            print("Skipped keys (no match found):")
+            for k in skipped_keys:
+                print(f"- {k}")
+        print("---------------------------------")
 
-    if args.model == 's_dann':
-        model = EfficientNetV2_S_DANN(num_classes=2, num_domains=2)
-    elif args.model == 'l':
-        model = EfficientNetV2_L(num_classes=2)
-
-    elif args.model == 'convNextv2_tiny':
-        model = ConvNext_V2_Tiny(num_classes=2)
-    else:
-        model = EfficientNetV2_S(num_classes=2)
-
-    result = model.load_state_dict(new_state_dict, strict=True)
+    result = model.load_state_dict(new_state_dict, strict=False)
 
     if main_process:
         print("--- Loading Model Weights ---")
@@ -298,19 +333,18 @@ def parse_args():
     parser.add_argument('--nowear', type=str, help='Directory with negative class images (no-wear)')
     parser.add_argument('--img-size', type=int, default=384, help='Square image size for resizing')
     parser.add_argument('--model', type=str, default='convNextv2_tiny', choices=['s', 's_dann', 'l','convNextv2_tiny'], help='Model variant: s, s_dann, or l')
-    parser.add_argument('--weights', type=str, default='checkpoints/convnext_v2_tiny/best_model.pth', help='Path to model weights .pth')
+    parser.add_argument('--weights', type=str, default='convnext_v2_tiny_FDA_CORAL_CDAN_hat_sota/best_model.pth', help='Path to model weights .pth')
     parser.add_argument('--batch-size', type=int, default=64, help='Batch size per process')
 
     args = parser.parse_args()
 
     # Hardcoded paths as a fallback
     if not args.wear:
-        args.wear = '/media/ubuntu/새 볼륨/dataset/034.마스크 착용 한국인 안면 이미지 데이터/01.데이터/1.Training/원천데이터/yolo_face_detection_result_1'
-        args.wear = '/home/ubuntu/KOR_DATA/sunglass_dataset/wear'
+        args.wear = '/home/ubuntu/KOR_DATA/high_resolution_hat_wear'
+
     if not args.nowear:
         args.nowear = '/home/ubuntu/KOR_DATA/high_resolution_not_wear_hat'
-        args.nowear= '/home/ubuntu/KOR_DATA/sunglass_dataset/nowear'
-        #args.nowear = '/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/neckslice/refining_yaw_yaw'
+
     return args
 
 def main():

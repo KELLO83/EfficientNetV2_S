@@ -5,6 +5,7 @@ import pathlib
 import random
 import math
 import sys
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -992,14 +993,58 @@ def main_worker(rank: int, world_size: int, args):
                     'Max Group Loss': max_group_loss_epoch if args.use_groupdro else 0.0,
                 })
 
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            if rank == 0:
-                state = unwrap_model(model).state_dict()
-                os.makedirs(args.checkpoint_dir, exist_ok=True)
-                torch.save({'model_state_dict': state, 'epoch': epoch}, os.path.join(args.checkpoint_dir, 'best_model.pth'))
-
         if rank == 0:
+            def prepare_state_dicts(state_dict):
+                cleaned_state = OrderedDict()
+                backbone_state = OrderedDict()
+                for key, value in state_dict.items():
+                    name = key.replace('_orig_mod.', '') if key.startswith('_orig_mod.') else key
+                    cleaned_state[name] = value
+
+                    if name.startswith('backbone.'):
+                        backbone_key = name[len('backbone.') :]
+                        backbone_state[backbone_key] = value
+
+                return cleaned_state, backbone_state
+
+            # Save periodic checkpoints
+            if (epoch + 1) % 2 == 0:
+                state_to_save = model.module.state_dict() if world_size > 1 else model.state_dict()
+                cleaned_state_dict, backbone_state_dict = prepare_state_dicts(state_to_save)
+
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': cleaned_state_dict,
+                    'backbone_state_dict': backbone_state_dict,
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'best_val_loss': best_val_loss
+                }
+
+                checkpoint_path = os.path.join(args.checkpoint_dir, f'{args.wandb_name}_epoch_{epoch+1}.pth')
+                os.makedirs(args.checkpoint_dir, exist_ok=True)
+                torch.save(checkpoint, checkpoint_path)
+                logging.info(f"Saved checkpoint to {checkpoint_path}")
+
+            # Save best model
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                state_to_save = model.module.state_dict() if world_size > 1 else model.state_dict()
+                cleaned_state_dict, backbone_state_dict = prepare_state_dicts(state_to_save)
+
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': cleaned_state_dict,
+                    'backbone_state_dict': backbone_state_dict,
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'best_val_loss': best_val_loss
+                }
+                best_model_path = os.path.join(args.checkpoint_dir, 'best_model.pth')
+                os.makedirs(args.checkpoint_dir, exist_ok=True)
+                torch.save(checkpoint, best_model_path)
+                logging.info(f"Saved best model to {best_model_path} with val loss: {best_val_loss:.4f}")
+            
             early_stopping(avg_val_loss)
 
         if world_size > 1:

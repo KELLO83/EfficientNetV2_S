@@ -260,6 +260,7 @@ class EfficientNetV2_S_DANN(nn.Module):
         return label_output, domain_output
     
 
+
 # class GradientReversalFunction(Function):
 #     @staticmethod
 #     def forward(ctx, x, alpha):
