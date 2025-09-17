@@ -452,6 +452,7 @@ def main_worker(rank, world_size, args):
         os.makedirs(checkpoint_dir, exist_ok=True)
 
     for epoch in range(args.epochs):
+        current_coral_lambda = compute_coral_lambda(epoch, args)
         if train_sampler:
             train_sampler.set_epoch(epoch)
 
@@ -485,11 +486,18 @@ def main_worker(rank, world_size, args):
                     features = features.mean(dim=list(range(2, features.ndim)))
 
                 coral_val = torch.zeros((), device=device, dtype=features.dtype)
-                if domain_labels is not None and args.coral_lambda > 0.0:
-                    source_mask = domain_labels == 0
-                    target_mask = domain_labels == 1
-                    if source_mask.any() and target_mask.any():
-                        coral_val = deep_coral_loss(features[source_mask], features[target_mask])
+                if domain_labels is not None and current_coral_lambda > 0.0:
+                    source_mask_all = domain_labels == 0
+                    target_mask_all = domain_labels == 1
+                    coral_terms = []
+                    for cls in torch.unique(label):
+                        cls_mask = label == cls
+                        src_mask = source_mask_all & cls_mask
+                        tgt_mask = target_mask_all & cls_mask
+                        if src_mask.sum() > 1 and tgt_mask.sum() > 1:
+                            coral_terms.append(deep_coral_loss(features[src_mask], features[tgt_mask]))
+                    if coral_terms:
+                        coral_val = torch.stack(coral_terms).mean()
 
                 if args.mixup_alpha > 0.0:
                     inputs_mix, targets_a, targets_b, lam = mixup_data(data_input, label, args.mixup_alpha)
@@ -499,7 +507,7 @@ def main_worker(rank, world_size, args):
                     logit = logits_base
                     cls_loss = criterion(logit, label)
 
-                loss = cls_loss + (args.coral_lambda * coral_val)
+                loss = cls_loss + (current_coral_lambda * coral_val)
             
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -517,7 +525,7 @@ def main_worker(rank, world_size, args):
                 correct_train += (predicted == label).sum().item()
             
             if rank == 0:
-                pbar_train.set_postfix({'loss': loss.item(), 'coral': coral_val.item()})
+                pbar_train.set_postfix({'loss': loss.item(), 'coral': coral_val.item(), 'λ_coral': current_coral_lambda})
 
         train_accuracy = 100 * correct_train / total_train
 
@@ -560,13 +568,14 @@ def main_worker(rank, world_size, args):
                "Train Loss": train_loss / len(trainloader),
                "Train Accuracy": train_accuracy,
                "Train Coral Loss": coral_loss_sum / len(trainloader),
+               "Coral Lambda": current_coral_lambda,
                "Val Loss": avg_val_loss,
                "Val Accuracy": val_accuracy,
                "Learning Rate": scheduler.get_last_lr()[0]
             })
 
         if rank == 0:
-            logging.info(f"Epoch {epoch+1}, Train Loss: {train_loss/len(trainloader):.4f}, Train Acc: {train_accuracy:.2f}%, Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.2f}%")
+            logging.info(f"Epoch {epoch+1}, Train Loss: {train_loss/len(trainloader):.4f}, Train Acc: {train_accuracy:.2f}%, Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.2f}%, Coral λ: {current_coral_lambda:.4f}")
 
             # Save periodic checkpoints
             if (epoch + 1) % 2 == 0 :
@@ -659,9 +668,12 @@ def main():
     parser.add_argument('--no_confirm', action='store_true', help='Skip argument confirmation prompt')
     parser.add_argument('--data_check', action='store_true', help='Visualize a batch of data to check augmentations')
 
-    parser.add_argument('--mixup_alpha', type=float, default=0.2, help='Mixup alpha (0 disables mixup)')
+    parser.add_argument('--mixup_alpha', type=float, default=0, help='Mixup alpha (0 disables mixup)')
     parser.add_argument('--label_smoothing', type=float, default=0.1, help='CrossEntropy label smoothing')
-    parser.add_argument('--coral_lambda', type=float, default=0.1, help='Weight for Deep CORAL alignment loss')
+    parser.add_argument('--coral_lambda_start', type=float, default=0.01, help='Initial CORAL weight after warmup ramp')
+    parser.add_argument('--coral_lambda_target', type=float, default=0.05, help='Target CORAL weight after ramp-up')
+    parser.add_argument('--coral_warmup_epochs', type=int, default=2, help='Epochs to reach coral_lambda_start from 0')
+    parser.add_argument('--coral_ramp_epochs', type=int, default=10, help='Epoch to finish ramping towards coral_lambda_target')
 
     # Boolean flags with default True via paired options
     parser.add_argument('--bn_freeze_stats', dest='bn_freeze_stats', action='store_true', help='Freeze BN running stats during training')
@@ -719,3 +731,13 @@ def main():
 
 if __name__ == '__main__':
     main()
+def compute_coral_lambda(epoch: int, args) -> float:
+    warmup_epochs = max(1, args.coral_warmup_epochs)
+    ramp_epochs = max(warmup_epochs, args.coral_ramp_epochs)
+
+    if epoch < warmup_epochs:
+        return args.coral_lambda_start * (epoch + 1) / warmup_epochs
+    if epoch < ramp_epochs:
+        progress = (epoch - warmup_epochs + 1) / (ramp_epochs - warmup_epochs + 1)
+        return args.coral_lambda_start + progress * (args.coral_lambda_target - args.coral_lambda_start)
+    return args.coral_lambda_target

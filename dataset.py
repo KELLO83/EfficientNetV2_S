@@ -143,8 +143,8 @@ class custom_dataset_FDA_CORAL(data.Dataset):
                     v2.RandomAffine(degrees=6, translate=(0.015, 0.015), scale=(0.97, 1.03), shear=(-2, 2)),
                     v2.RandomPerspective(distortion_scale=0.08)
                 ])
-            ], p=0.6),
-            v2.RandomApply([v2.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.1),
+            ], p=0.3),
+            v2.RandomApply([v2.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.3),
             
             v2.Resize(size=(img_size, img_size)),
             v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
