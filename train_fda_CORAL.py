@@ -6,7 +6,7 @@ from tqdm import tqdm
 import wandb
 import os
 import pathlib
-from dataset import custom_dataset_FDA
+from dataset import custom_dataset_FDA_CORAL
 import numpy as np
 import cv2
 import logging
@@ -339,7 +339,7 @@ def main_worker(rank, world_size, args):
     val_wear = [path for path, label in zip(val_list, val_labels) if label == 1]
     val_no_wear = [path for path, label in zip(val_list, val_labels) if label == 0]
 
-    train_dataset = custom_dataset_FDA(
+    train_dataset = custom_dataset_FDA_CORAL(
         wear_data=train_wear,
         no_wear_data=train_no_wear,
         img_size=args.img_size,
@@ -349,7 +349,7 @@ def main_worker(rank, world_size, args):
         fda_prob=args.fda_prob,
         return_domain=True,
     )
-    val_dataset = custom_dataset_FDA(
+    val_dataset = custom_dataset_FDA_CORAL(
         wear_data=val_wear,
         no_wear_data=val_no_wear,
         train=False,
@@ -481,7 +481,8 @@ def main_worker(rank, world_size, args):
             # Use autocast only when CUDA is available (safer across PyTorch versions)
             with torch.amp.autocast(device_type=device.type, enabled=(device.type == 'cuda')):
                 logits_base, features = model(data_input, return_features=True)
-                features = features.flatten(start_dim=1)
+                if features.ndim > 2:
+                    features = features.mean(dim=list(range(2, features.ndim)))
 
                 coral_val = torch.zeros((), device=device, dtype=features.dtype)
                 if domain_labels is not None and args.coral_lambda > 0.0:
@@ -660,7 +661,7 @@ def main():
 
     parser.add_argument('--mixup_alpha', type=float, default=0.2, help='Mixup alpha (0 disables mixup)')
     parser.add_argument('--label_smoothing', type=float, default=0.1, help='CrossEntropy label smoothing')
-    parser.add_argument('--coral_lambda', type=float, default=0.5, help='Weight for Deep CORAL alignment loss')
+    parser.add_argument('--coral_lambda', type=float, default=0.1, help='Weight for Deep CORAL alignment loss')
 
     # Boolean flags with default True via paired options
     parser.add_argument('--bn_freeze_stats', dest='bn_freeze_stats', action='store_true', help='Freeze BN running stats during training')
@@ -681,7 +682,7 @@ def main():
     # W&B arguments
     parser.add_argument('--wandb', action='store_true', help='Use wandb or not')
     parser.add_argument('--project', type=str, default='ConvNextV2_FDA', help='wandb project name')
-    parser.add_argument('--wandb_name', type=str, default='FDA', help='wandb experiment name')
+    parser.add_argument('--wandb_name', type=str, default='FDA_CORAL', help='wandb experiment name')
     
     args = parser.parse_args()
 

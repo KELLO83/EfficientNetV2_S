@@ -8,7 +8,7 @@ model_list = timm.list_models('convnextv2_*fcmae*', pretrained=True)
 for m in model_list:
     print(m)
 
-model = timm.create_model('convnextv2_base.fcmae_ft_in22k_in1k_384', pretrained=True , num_classes=2)
+model = timm.create_model('convnextv2_tiny.fcmae_ft_in22k_in1k_384', pretrained=True , num_classes=2)
 
 for name , parm in model.named_parameters():
     parm.requires_grad = False

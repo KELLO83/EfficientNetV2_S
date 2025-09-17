@@ -1,7 +1,7 @@
 import numpy as np
 
 class EarlyStopping():
-    def __init__(self, patience=10, verbose=False, delta=5e-2):
+    def __init__(self, patience=10, verbose=False, delta=1e-3):
         """
         Args:
             patience (int): validation loss가 개선되지 않을 때 기다릴 epoch 수
