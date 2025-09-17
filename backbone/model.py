@@ -2,7 +2,7 @@ import timm
 import torch
 import torch.nn as nn
 from torch.autograd import Function
-
+import pathlib
 
 def build_param_groups_lrd(model: nn.Module):
     """Build parameter groups with layer-wise decayed LRs for EfficientNetV2-S.
@@ -313,18 +313,31 @@ class ConvNext_V2_Tiny(nn.Module):
         return logits
 
 
+class ConvNext_V2_Tiny_DinoV3(nn.Module):
+    def __init__(self):
+        super().__init__()
+        current_dir = pathlib.Path(__file__).parent.resolve()
+        dinov3_path = current_dir / 'dinov3'
+        self.model = torch.hub.load(str(dinov3_path),'dinov3_convnext_tiny', source='local', weights='dinov3_convnext_tiny_pretrain_lvd.pth')
+
+
+    def forward(self, x):
+        out = self.model(x)
+        return out
+
+
+
 if __name__ == "__main__":
 
-    model = ConvNext_V2_Tiny()
+    # model = ConvNext_V2_Tiny()
     
+    model = ConvNext_V2_Tiny_DinoV3()
+    backbone_params = sum(p.numel() for p in model.parameters())
+    trainable_backbone_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model total params: {backbone_params:,}")
+    print(f"Model trainable params: {trainable_backbone_params:,}")
+    print(f"traineable params percentage: {100 * trainable_backbone_params / backbone_params:.2f}%")
+    print('==' * 30)
 
-
-    # model = EfficientNetV2_S_improved()
-
-    # backbone_params = sum(p.numel() for p in model.parameters())
-    # trainable_backbone_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    # print(f"Model total params: {backbone_params:,}")
-    # print(f"Model trainable params: {trainable_backbone_params:,}")
-    # print(f"traineable params percentage: {100 * trainable_backbone_params / backbone_params:.2f}%")
-    # print('==' * 30)
-
+    for name , param in model.named_parameters():
+        print(f"name: {name}, requires_grad: {param.requires_grad}")

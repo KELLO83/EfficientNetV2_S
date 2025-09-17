@@ -254,6 +254,7 @@ def class_conditional_coral(
 
         if cls_int in target_class_set and real_target_mask.sum() > 1:
             target_mask = real_target_mask
+
         elif use_synth_fallback and synthetic_mask.sum() > 1:
             target_mask = synthetic_mask
             weight = synth_weight
@@ -433,7 +434,7 @@ def prepare_samples(args) -> Tuple[List[Sample], List[Sample], List[pathlib.Path
     source_wear = gather_paths(args.source_wear_dir, args.source_wear_dir2)
     source_nowear = gather_paths(args.source_nowear_dir, args.source_nowear_dir2)
     target_nowear = gather_paths(args.target_nowear_dir, args.target_nowear_dir2)
-    target_wear = gather_paths(args.target_wear_dir)
+    target_wear = gather_paths(args.target_wear_dir , args.target_wear_dir2)
 
     if not source_wear or not source_nowear:
         raise ValueError("Source wear/nowear data not found. Check directory paths.")
@@ -788,7 +789,33 @@ def main_worker(rank: int, world_size: int, args):
 
 def main():
     parser = argparse.ArgumentParser(description='ConvNeXt CDAN with Light CORAL for FDA data')
+    """
 
+-fda_beta: 저주파 패치를 얼마나 넓게 교환할지 결정하는 반경 비율. 0.05면 이미지 한 변의 5% 수준으로 스타일을 섞습니다.
+  - --fda_prob: 강제 FDA가 아닌 일반 소스 샘플에 대해 FDA를 적용할 확률.
+  - --synthetic_target_wear_multiplier: 타깃 착용이 없을 때 소스 착용 샘플을 몇 배까지 합성할지 결정.
+  - --max_synthetic_target_wear: 합성 타깃 착용 샘플의 상한(0이면 제한 없음).
+  - --synthetic_target_force_prob: force_fda=True 샘플(=합성 타깃 후보)에 대해 FDA를 강제로 적용할 확률.
+  - --FDA_data: FDA 스타일을 뽑아올 타깃 스타일 이미지 폴더.
+
+  - --domain_lambda: CDAN을 켤지/껄지 결정하는 가중치. 0이면 현재 코드 흐름(FDA+CORAL+GroupDRO)만 사용, >0이면 CDAN 도메인 손실이 추가됨.
+  - --domain_hidden_dim: CDAN 도메인 분류기의 은닉 차원.
+  - --domain_weight_real: 실제 타깃 클래스가 존재할 때 도메인 손실에 주는 가중치.
+  - --domain_weight_synth: 합성 타깃을 도메인 손실에 포함시킬 때의 가중치(실제보다 낮게 두어 음의 전이 억제).
+
+  - --light_coral_dim: Light CORAL을 위해 특성 차원을 낮추는 투영 차원.
+  - --light_coral_trainable: 투영 행렬을 학습 가능하도록 할지 (기본은 고정).
+  - --coral_lambda_start/target: CORAL 손실의 초기·최대 가중치.
+  - --coral_warmup_epochs, --coral_ramp_epochs: CORAL 가중치를 램프업하는 에포크 수.
+  - --coral_use_synth_fallback: 실 타깃 클래스가 없는 경우 합성 타깃을 CORAL에 쓰도록 허용.
+  - --coral_synth_weight: 합성 타깃이 CORAL에 기여할 때의 추가 스케일.
+
+  - --use_groupdro: GroupDRO를 켜서 그룹별 worst-case를 안정화할지 여부.
+  - --groupdro_eta: GroupDRO의 q 갱신 학습률(크면 빠르게 전환하지만 불안정할 수 있음).
+  - --groupdro_split_synth: 합성 타깃을 별도 도메인으로 취급해 더욱 보수적으로 가중치를 조정할지.
+
+    """
+    
     parser.add_argument('--num_classes', type=int, default=2, help='Number of classes for classification')
 
     parser.add_argument('--source_wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/마스크_원시데이터/TS1')
@@ -798,6 +825,7 @@ def main():
     parser.add_argument('--target_nowear_dir', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_not_wear_hat')
     parser.add_argument('--target_nowear_dir2', type=str, default='')
     parser.add_argument('--target_wear_dir', type=str, default='')
+    parser.add_argument('--target_wear_dir2', type=str, default='')
 
     parser.add_argument('--img_size', type=int, default=384)
     parser.add_argument('--batch_size', type=int, default=8)
@@ -813,7 +841,7 @@ def main():
     parser.add_argument('--synthetic_target_force_prob', type=float, default=1.0, help='Probability to apply FDA when force_fda flag is set')
     parser.add_argument('--FDA_data', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_train_data_640')
 
-    parser.add_argument('--domain_lambda', type=float, default=1.0, help='Weight for domain adversarial loss')
+    parser.add_argument('--domain_lambda', type=float, default=0.05, help='Weight for domain adversarial loss when using domain lambda 1.0')
     parser.add_argument('--domain_hidden_dim', type=int, default=1024, help='Hidden dimension of CDAN domain classifier')
     parser.add_argument('--domain_weight_real', type=float, default=1.0, help='Weight for domain loss on classes observed in real target data')
     parser.add_argument('--domain_weight_synth', type=float, default=0.3, help='Weight for domain loss when relying on synthetic target samples')
@@ -822,8 +850,8 @@ def main():
     parser.add_argument('--light_coral_trainable', action='store_true', help='Allow Light CORAL projector weights to be trainable')
     parser.add_argument('--coral_lambda_start', type=float, default=0.01)
     parser.add_argument('--coral_lambda_target', type=float, default=0.05)
-    parser.add_argument('--coral_warmup_epochs', type=int, default=5)
-    parser.add_argument('--coral_ramp_epochs', type=int, default=15)
+    parser.add_argument('--coral_warmup_epochs', type=int, default=2)
+    parser.add_argument('--coral_ramp_epochs', type=int, default=10)
     parser.add_argument('--coral_use_synth_fallback', action='store_true', help='Use synthetic target samples for CORAL when real target samples are absent for a class')
     parser.add_argument('--coral_synth_weight', type=float, default=0.5, help='Scaling factor for CORAL loss contributed by synthetic target samples')
     parser.add_argument('--use_groupdro', action='store_true', help='Enable GroupDRO on classification loss')
@@ -844,6 +872,19 @@ def main():
     parser.add_argument('--wandb_name', type=str, default='CDAN_LightCORAL')
 
     parser.add_argument('--no_confirm', action='store_true')
+
+    parser.set_defaults(
+        domain_lambda=0.0,
+        use_groupdro=True,
+        coral_use_synth_fallback=True,
+    )
+
+    # # 타켓도메인 착용 / 미착용 존재할떄
+    # parser.set_defaults(
+    #      domain_lambda=0.05,   # CDAN 가중치
+    #      use_groupdro=True,
+    #      coral_use_synth_fallback=False,  # 합성 fallback 필요 없음
+    #  )
 
     args = parser.parse_args()
 
