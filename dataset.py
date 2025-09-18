@@ -123,7 +123,7 @@ class custom_dataset_FDA(data.Dataset):
 class custom_dataset_FDA_CORAL(data.Dataset):
     def __init__(self, wear_data=None, no_wear_data=None , train = True , img_size =  320,
                  fda_images: Optional[List[pathlib.Path]] = None, fda_beta: float = 0.0, fda_prob: float = 0.0,
-                 return_domain: bool = False):
+                 return_domain: bool = False, force_domain: Optional[int] = None):
         self.train = train
         self.wear_data = wear_data
         self.no_wear_data = no_wear_data
@@ -131,6 +131,11 @@ class custom_dataset_FDA_CORAL(data.Dataset):
         self.fda_beta = max(0.0, fda_beta)
         self.fda_prob = max(0.0, min(1.0, fda_prob))
         self.return_domain = return_domain
+        if force_domain is not None and force_domain not in (0, 1):
+            raise ValueError("force_domain must be None, 0, or 1")
+        if force_domain == 1 and (not self.fda_images or self.fda_beta <= 0):
+            raise ValueError("force_domain=1 requires available FDA reference images and positive fda_beta")
+        self.force_domain = force_domain
         self.train_transform = v2.Compose([
             v2.ToImage(),
             v2.ToDtype(torch.float32, scale=True),
@@ -174,7 +179,12 @@ class custom_dataset_FDA_CORAL(data.Dataset):
         image = cv2.imread(str(item))
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         applied_fda = False
-        if self.train and self.fda_images and self.fda_beta > 0 and random.random() < self.fda_prob:
+        if self.force_domain is not None:
+            apply_fda = bool(self.force_domain)
+        else:
+            apply_fda = self.train and self.fda_images and self.fda_beta > 0 and random.random() < self.fda_prob
+
+        if apply_fda:
             image = self._apply_fda(image)
             applied_fda = True
         if self.train:
@@ -184,9 +194,18 @@ class custom_dataset_FDA_CORAL(data.Dataset):
 
         label = self.labels[idx]
         if self.return_domain:
-            domain_label = torch.tensor(1 if applied_fda else 0, dtype=torch.long)
+            domain_flag = 1 if applied_fda else 0
+            # When force_domain is set but FDA unexpectedly fails, retain desired flag for consistency.
+            if self.force_domain is not None:
+                domain_flag = self.force_domain
+            domain_label = torch.tensor(domain_flag, dtype=torch.long)
             return tensor_image, label, domain_label
         return tensor_image , label
+
+    def get_label_domain(self, idx: int) -> Tuple[int, Optional[int]]:
+        label = int(self.labels[idx])
+        domain = self.force_domain if self.force_domain is not None else None
+        return label, domain
 
     def _apply_fda(self, src_img: np.ndarray) -> np.ndarray:
         """Apply Fourier Domain Adaptation using a random image from the FDA pool."""

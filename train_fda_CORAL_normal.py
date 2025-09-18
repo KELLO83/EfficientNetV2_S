@@ -10,6 +10,7 @@ from dataset import custom_dataset_FDA_CORAL
 import numpy as np
 import cv2
 import logging
+import random
 
 from backbone.model import (
     EfficientNetV2_S,
@@ -30,11 +31,13 @@ from torch.utils.data.distributed import DistributedSampler
 import torch.multiprocessing as mp
 from collections import OrderedDict
 from natsort import natsorted
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset, Sampler
 import torchvision
 import torch.nn as nn
 import math
 from typing import Optional, List
+from torch.nn.utils import clip_grad_norm_
+from torch.nn.utils import clip_grad_norm_
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
@@ -66,7 +69,14 @@ def data_check(loader: DataLoader, is_bgr: bool):
     std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
     labels = []
     cv2.namedWindow('Data Check - Press any key to continue', cv2.WINDOW_NORMAL)
-    for images, label in it:
+    for batch in it:
+        if isinstance(batch, (list, tuple)) and len(batch) == 3:
+            images, label, domain = batch
+            domain_np = domain.cpu().numpy().tolist()
+        else:
+            images, label = batch
+            domain_np = None
+
         labels = []
         images_unnorm = images.clone()
         labels.extend(label.cpu().numpy().tolist())
@@ -81,14 +91,17 @@ def data_check(loader: DataLoader, is_bgr: bool):
             grid_np = cv2.cvtColor(grid_np, cv2.COLOR_RGB2BGR)
         
         cv2.imshow('Data Check - Press any key to continue', grid_np)
-        print("Labels in this batch:", labels)
+        if domain_np is not None:
+            print("Labels:", labels, "Domains:", domain_np)
+        else:
+            print("Labels in this batch:", labels)
         key = cv2.waitKey(0)
         if key == 27:
             logging.info("ESC key pressed. Exiting data check.")
             break
 
     cv2.destroyAllWindows()
-    exit(0)
+    logging.info("Data check completed.")
 
 
 def find_max_batch_size(model, input_shape, device):
@@ -218,6 +231,243 @@ class EMA:
                 p.data.copy_(self.backup[name])
         self.backup = {}
 
+
+def _build_domain_class_indices(dataset) -> dict:
+    """Group dataset indices by (domain, class) pairs, supporting ConcatDataset."""
+
+    group_indices = {}
+
+    def register(idx_global: int, label: int, domain: int):
+        key = (domain, label)
+        group_indices.setdefault(key, []).append(idx_global)
+
+    if isinstance(dataset, ConcatDataset):
+        cumulative = [0] + dataset.cumulative_sizes
+        for ds_idx, sub_ds in enumerate(dataset.datasets):
+            offset = cumulative[ds_idx]
+            if not hasattr(sub_ds, 'get_label_domain'):
+                raise ValueError("Sub-dataset lacks get_label_domain required for balanced sampling")
+            for local_idx in range(len(sub_ds)):
+                label, domain = sub_ds.get_label_domain(local_idx)
+                if domain is None:
+                    raise ValueError("Balanced sampling requires deterministic domain labels (force_domain set)")
+                register(offset + local_idx, label, domain)
+    else:
+        if not hasattr(dataset, 'get_label_domain'):
+            raise ValueError("Dataset lacks get_label_domain required for balanced sampling")
+        for idx in range(len(dataset)):
+            label, domain = dataset.get_label_domain(idx)
+            if domain is None:
+                raise ValueError("Balanced sampling requires deterministic domain labels (force_domain set)")
+            register(idx, label, domain)
+
+    return group_indices
+
+
+class DomainClassBalancedBatchSampler(Sampler[List[int]]):
+    """Ensure each batch contains at least `min_per_group` samples per (domain, class) pair."""
+
+    def __init__(self, dataset, batch_size: int, min_per_group: int = 1, drop_last: bool = False, seed: int = 0):
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive for DomainClassBalancedBatchSampler")
+        if min_per_group <= 0:
+            raise ValueError("min_per_group must be positive")
+
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.min_per_group = min_per_group
+        self.drop_last = drop_last
+        self.seed = seed
+        self.group_indices = _build_domain_class_indices(dataset)
+        self.group_keys = list(self.group_indices.keys())
+        self.epoch = 0
+
+        if not self.group_keys:
+            raise ValueError("No (domain, class) groups found. Ensure dataset exposes get_label_domain with force_domain set.")
+
+        required = self.min_per_group * len(self.group_keys)
+        if self.batch_size < required:
+            raise ValueError(
+                f"batch_size ({self.batch_size}) must be at least min_per_group * num_groups ({required}) "
+                "to satisfy domain/class balancing."
+            )
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self.epoch)
+        buffers = {key: indices.copy() for key, indices in self.group_indices.items()}
+        for indices in buffers.values():
+            rng.shuffle(indices)
+
+        while all(len(indices) >= self.min_per_group for indices in buffers.values()):
+            batch: List[int] = []
+            for key in self.group_keys:
+                indices = buffers[key]
+                for _ in range(self.min_per_group):
+                    batch.append(indices.pop())
+
+            while len(batch) < self.batch_size:
+                available = [key for key, indices in buffers.items() if indices]
+                if not available:
+                    break
+                chosen_key = rng.choice(available)
+                batch.append(buffers[chosen_key].pop())
+
+            yield batch
+
+        leftovers = [idx for indices in buffers.values() for idx in indices]
+        rng.shuffle(leftovers)
+        if leftovers and not self.drop_last:
+            for start in range(0, len(leftovers), self.batch_size):
+                chunk = leftovers[start:start + self.batch_size]
+                if len(chunk) == self.batch_size or not self.drop_last:
+                    yield chunk
+
+    def __len__(self) -> int:
+        buffers = {key: indices.copy() for key, indices in self.group_indices.items()}
+        count = 0
+        while all(len(indices) >= self.min_per_group for indices in buffers.values()):
+            for key in self.group_keys:
+                indices = buffers[key]
+                for _ in range(self.min_per_group):
+                    indices.pop()
+            remaining_capacity = self.batch_size - self.min_per_group * len(self.group_keys)
+            while remaining_capacity > 0:
+                available = [key for key, indices in buffers.items() if indices]
+                if not available:
+                    break
+                chosen_key = available[0]
+                buffers[chosen_key].pop()
+                remaining_capacity -= 1
+            count += 1
+
+        leftovers = sum(len(indices) for indices in buffers.values())
+        if leftovers > 0 and not self.drop_last:
+            count += math.ceil(leftovers / self.batch_size)
+        return count
+
+
+class DomainClassBalancedDistributedBatchSampler(Sampler[List[int]]):
+    """Balanced sampler that cooperates with DistributedDataParallel workers."""
+
+    def __init__(
+        self,
+        dataset,
+        batch_size: int,
+        min_per_group: int = 1,
+        drop_last: bool = False,
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
+        seed: int = 0,
+    ):
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive for DomainClassBalancedDistributedBatchSampler")
+        if min_per_group <= 0:
+            raise ValueError("min_per_group must be positive")
+
+        if num_replicas is None:
+            if not dist.is_available():
+                raise RuntimeError("Distributed package is not available")
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            if not dist.is_available():
+                raise RuntimeError("Distributed package is not available")
+            rank = dist.get_rank()
+
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.min_per_group = min_per_group
+        self.drop_last = drop_last
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.seed = seed
+        self.epoch = 0
+
+        self.group_indices = _build_domain_class_indices(dataset)
+        self.group_keys = list(self.group_indices.keys())
+
+        if not self.group_keys:
+            raise ValueError("No (domain, class) groups found. Ensure dataset exposes get_label_domain with force_domain set.")
+
+        required = self.min_per_group * len(self.group_keys)
+        if self.batch_size < required:
+            raise ValueError(
+                f"batch_size ({self.batch_size}) must be at least min_per_group * num_groups ({required}) "
+                "to satisfy domain/class balancing."
+            )
+
+    @property
+    def global_batch_size(self) -> int:
+        return self.batch_size * self.num_replicas
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self.epoch)
+        buffers = {key: indices.copy() for key, indices in self.group_indices.items()}
+        for indices in buffers.values():
+            rng.shuffle(indices)
+
+        # Generate full balanced batches shared across replicas
+        while all(len(indices) >= self.min_per_group * self.num_replicas for indices in buffers.values()):
+            per_rank_batches = [[] for _ in range(self.num_replicas)]
+
+            for key in self.group_keys:
+                indices = buffers[key]
+                for replica in range(self.num_replicas):
+                    for _ in range(self.min_per_group):
+                        per_rank_batches[replica].append(indices.pop())
+
+            # Fill remaining slots round-robin while maintaining identical counts across replicas
+            while any(len(b) < self.batch_size for b in per_rank_batches):
+                available = [key for key, idxs in buffers.items() if idxs]
+                if not available:
+                    break
+                chosen_key = rng.choice(available)
+                target_replica = min(range(self.num_replicas), key=lambda r: len(per_rank_batches[r]))
+                per_rank_batches[target_replica].append(buffers[chosen_key].pop())
+
+            yield per_rank_batches[self.rank]
+
+        # Remaining samples are dropped unless they can form full global batches
+        leftovers = [idx for indices in buffers.values() for idx in indices]
+        if leftovers and not self.drop_last:
+            rng.shuffle(leftovers)
+            total_full = len(leftovers) // self.global_batch_size
+            for batch_idx in range(total_full):
+                start = batch_idx * self.global_batch_size
+                chunk = leftovers[start:start + self.global_batch_size]
+                per_rank = [
+                    chunk[i * self.batch_size:(i + 1) * self.batch_size]
+                    for i in range(self.num_replicas)
+                ]
+                if len(per_rank[self.rank]) == self.batch_size:
+                    yield per_rank[self.rank]
+
+    def __len__(self) -> int:
+        buffers = {key: len(indices) for key, indices in self.group_indices.items()}
+        count = 0
+        while all(length >= self.min_per_group * self.num_replicas for length in buffers.values()):
+            for key in self.group_keys:
+                buffers[key] -= self.min_per_group * self.num_replicas
+            remaining_capacity = self.global_batch_size - self.min_per_group * self.num_replicas * len(self.group_keys)
+            while remaining_capacity > 0:
+                available = [key for key, length in buffers.items() if length > 0]
+                if not available:
+                    break
+                chosen_key = available[0]
+                buffers[chosen_key] -= 1
+                remaining_capacity -= 1
+            count += 1
+
+        leftovers = sum(buffers.values())
+        if leftovers >= self.global_batch_size and not self.drop_last:
+            count += leftovers // self.global_batch_size
+        return count
+
 def load_extra_data(path, fraction):
     p = pathlib.Path(path)
     if not p.exists():
@@ -294,7 +544,7 @@ def prepare_samples(args):
     )
     
     return train_list, val_list, train_labels, val_labels, fda_images
-    
+
 
 def main_worker(rank, world_size, args):
     if rank == 0:
@@ -350,16 +600,44 @@ def main_worker(rank, world_size, args):
     val_wear = [path for path, label in zip(val_list, val_labels) if label == 1]
     val_no_wear = [path for path, label in zip(val_list, val_labels) if label == 0]
 
-    train_dataset = custom_dataset_FDA_CORAL(
-        wear_data=train_wear,
-        no_wear_data=train_no_wear,
-        img_size=args.img_size,
-        train=True,
-        fda_images=fda_images,
-        fda_beta=args.fda_beta,
-        fda_prob=args.fda_prob,
-        return_domain=True,
-    )
+    balanced_batch_sampler = None
+
+    if args.balanced_domain_sampler:
+        source_dataset = custom_dataset_FDA_CORAL(
+            wear_data=train_wear,
+            no_wear_data=train_no_wear,
+            img_size=args.img_size,
+            train=True,
+            fda_images=fda_images,
+            fda_beta=args.fda_beta,
+            fda_prob=0.0,
+            return_domain=True,
+            force_domain=0,
+        )
+        target_dataset = custom_dataset_FDA_CORAL(
+            wear_data=train_wear,
+            no_wear_data=train_no_wear,
+            img_size=args.img_size,
+            train=True,
+            fda_images=fda_images,
+            fda_beta=args.fda_beta,
+            fda_prob=1.0,
+            return_domain=True,
+            force_domain=1,
+        )
+        train_dataset = ConcatDataset([source_dataset, target_dataset])
+    else:
+        train_dataset = custom_dataset_FDA_CORAL(
+            wear_data=train_wear,
+            no_wear_data=train_no_wear,
+            img_size=args.img_size,
+            train=True,
+            fda_images=fda_images,
+            fda_beta=args.fda_beta,
+            fda_prob=args.fda_prob,
+            return_domain=True,
+        )
+
     val_dataset = custom_dataset_FDA_CORAL(
         wear_data=val_wear,
         no_wear_data=val_no_wear,
@@ -367,10 +645,33 @@ def main_worker(rank, world_size, args):
         img_size=args.img_size,
     )
 
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank) if world_size > 1 else None
+    train_sampler = None
+    if args.balanced_domain_sampler:
+        if world_size > 1:
+            balanced_batch_sampler = DomainClassBalancedDistributedBatchSampler(
+                train_dataset,
+                batch_size=args.batch_size,
+                min_per_group=args.balanced_min_per_group,
+                drop_last=False,
+                num_replicas=world_size,
+                rank=rank,
+            )
+        else:
+            balanced_batch_sampler = DomainClassBalancedBatchSampler(
+                train_dataset,
+                batch_size=args.batch_size,
+                min_per_group=args.balanced_min_per_group,
+                drop_last=False,
+            )
+    elif world_size > 1:
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
 
-    trainloader = data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None), pin_memory=True, num_workers=4, sampler=train_sampler)
+    if balanced_batch_sampler is not None:
+        trainloader = data.DataLoader(train_dataset, batch_sampler=balanced_batch_sampler, pin_memory=True, num_workers=4)
+    else:
+        trainloader = data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None), pin_memory=True, num_workers=4, sampler=train_sampler)
     valloader = data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True, num_workers=4, sampler=val_sampler)
 
     # Run data_check safely under DDP (only rank 0 shows window)
@@ -456,6 +757,7 @@ def main_worker(rank, world_size, args):
     best_val_loss = float('inf')
     # Enable GradScaler only on CUDA to avoid CPU AMP issues (new API)
     scaler = torch.amp.GradScaler('cuda' if device.type == 'cuda' else 'cpu', enabled=(device.type == 'cuda'))
+
     ema = EMA(unwrap_model(model), decay=args.ema_decay) if args.use_ema else None
     
     if rank == 0:
@@ -463,9 +765,11 @@ def main_worker(rank, world_size, args):
         os.makedirs(checkpoint_dir, exist_ok=True)
 
     for epoch in range(args.epochs):
-        current_coral_lambda = compute_coral_lambda(epoch, args)
+        current_coral_lambda = args.coral_lambda
         if train_sampler:
             train_sampler.set_epoch(epoch)
+        elif balanced_batch_sampler and hasattr(balanced_batch_sampler, 'set_epoch'):
+            balanced_batch_sampler.set_epoch(epoch)
 
         model.train()
         if args.bn_freeze_stats:
@@ -521,6 +825,14 @@ def main_worker(rank, world_size, args):
                 loss = cls_loss + (current_coral_lambda * coral_val)
             
             scaler.scale(loss).backward()
+
+            norm_value = None
+            if args.grad_clip_norm > 0:
+                if scaler.is_enabled():
+                    scaler.unscale_(optimizer)
+                total_norm = clip_grad_norm_(model.parameters(), args.grad_clip_norm)
+                norm_value = float(total_norm)
+
             scaler.step(optimizer)
             scaler.update()
             if ema is not None:
@@ -536,7 +848,12 @@ def main_worker(rank, world_size, args):
                 correct_train += (predicted == label).sum().item()
             
             if rank == 0:
-                pbar_train.set_postfix({'loss': loss.item(), 'coral': coral_val.item(), 'λ_coral': current_coral_lambda})
+                pbar_train.set_postfix({
+                    'loss': loss.item(),
+                    'coral': coral_val.item(),
+                    'λ_coral': current_coral_lambda,
+                    'Norm': norm_value if norm_value is not None else 0.0
+                })
 
         train_accuracy = 100 * correct_train / total_train
 
@@ -582,7 +899,7 @@ def main_worker(rank, world_size, args):
                "Coral Lambda": current_coral_lambda,
                "Val Loss": avg_val_loss,
                "Val Accuracy": val_accuracy,
-               "Learning Rate": scheduler.get_last_lr()[0]
+               "Learning Rate": scheduler.get_last_lr()[0],
             })
 
         if rank == 0:
@@ -659,15 +976,17 @@ def main():
     # Model arguments
     parser.add_argument('--model', type=str, default='convnext_v2_tiny', choices=['efficientnetv2_s', 'efficientnetv2_l', 'efficientnetv2_s_improved' , 'convnext_v2_tiny'], help='Model type')
     parser.add_argument('--pretrained', action='store_true', help='Use pretrained weights')
-    parser.add_argument('--weight_path', type=str, default='effcientnet_s_mask_384/best_model.pth', help='Path to model weights')
+    parser.add_argument('--weight_path', type=str, default='checkpoints/best_model.pth', help='Path to model weights')
 
     # Data arguments
-    parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/sunglass/refining_yaw_yaw')
-    parser.add_argument('--wear_dir2' , type=str , default='')
+    parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/cap_data_recollect1')
+    parser.add_argument('--wear_dir2' , type=str , default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/cap_data_recollect2')
+
     parser.add_argument('--nowear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/neckslice/refining_yaw_yaw', help='Directory for "no wear" images')
     parser.add_argument('--nowear_dir2', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/glasses/refining_yaw_yaw', help='Directory for additional "no wear" images')
-    parser.add_argument('--fraction' ,type=float , default=1 , help='Fraction of nowear_dir2 to use (0.0 to 1.0)')
 
+    parser.add_argument('--fraction' ,type=float , default=1 , help='Fraction of nowear_dir2 to use (0.0 to 1.0)')
+    parser.add_argument('--ddp', action='store_true', help='Use Distributed Data Parallel (DDP) if multiple GPUs are available')
 
     parser.add_argument('--FDA_data', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_train_data_640', help='FDA data path')
     parser.add_argument('--fda_beta', type=float, default=0.05, help='Relative radius of low-frequency swap for FDA (0 disables)')
@@ -676,17 +995,17 @@ def main():
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=48, help='Batch size for training')
     parser.add_argument('--find_batch_size', action='store_true', help='Find the maximum batch size before training')
     parser.add_argument('--no_confirm', action='store_true', help='Skip argument confirmation prompt')
     parser.add_argument('--data_check', action='store_true', help='Visualize a batch of data to check augmentations')
 
     parser.add_argument('--mixup_alpha', type=float, default=0, help='Mixup alpha (0 disables mixup)')
     parser.add_argument('--label_smoothing', type=float, default=0.1, help='CrossEntropy label smoothing')
-    parser.add_argument('--coral_lambda_start', type=float, default=0.01, help='Initial CORAL weight after warmup ramp')
-    parser.add_argument('--coral_lambda_target', type=float, default=0.05, help='Target CORAL weight after ramp-up')
-    parser.add_argument('--coral_warmup_epochs', type=int, default=2, help='Epochs to reach coral_lambda_start from 0')
-    parser.add_argument('--coral_ramp_epochs', type=int, default=10, help='Epoch to finish ramping towards coral_lambda_target')
+    parser.add_argument('--grad_clip_norm', type=float, default=1.0, help='Max gradient norm for clipping (<=0 disables)')
+    parser.add_argument('--balanced_domain_sampler', action='store_true', help='Enable domain/class balanced batch sampling (supports DDP)')
+    parser.add_argument('--balanced_min_per_group', type=int, default=2, help='Minimum samples per (domain, class) group when using balanced sampler')
+    parser.add_argument('--coral_lambda', type=float, default=0.5, help='Fixed CORAL weight applied from the first epoch')
 
     # Boolean flags with default True via paired options
     parser.add_argument('--bn_freeze_stats', dest='bn_freeze_stats', action='store_true', help='Freeze BN running stats during training')
@@ -702,12 +1021,12 @@ def main():
     parser.add_argument('--tta_flip', action='store_true', help='Enable horizontal flip TTA at validation')
 
     # Set defaults for paired booleans
-    parser.set_defaults(bn_freeze_stats=True, lrd=True, use_ema=True)
+    parser.set_defaults(bn_freeze_stats=True, lrd=True, use_ema=True, ddp=True , balanced_domain_sampler=True)
 
     # W&B arguments
     parser.add_argument('--wandb', action='store_true', help='Use wandb or not')
-    parser.add_argument('--project', type=str, default='ConvNextV2_FDA', help='wandb project name')
-    parser.add_argument('--wandb_name', type=str, default='FDA_CORAL', help='wandb experiment name')
+    parser.add_argument('--project', type=str, default='ConvNextV2_FDA_CORAL', help='wandb project name')
+    parser.add_argument('--wandb_name', type=str, default='FDA_CORAL_LastBlock_GRAD_CLIP_ddp', help='wandb experiment name')
     
     args = parser.parse_args()
 
@@ -732,7 +1051,7 @@ def main():
             print("Non-interactive environment detected; skipping confirmation prompt. Use --no_confirm to suppress this message explicitly.")
     
     world_size = torch.cuda.device_count()
-    if world_size > 1:
+    if world_size > 1 and args.ddp:
         logging.info(f"Using {world_size} GPUs for DDP.")
         mp.spawn(main_worker,
                  args=(world_size, args),
@@ -744,13 +1063,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-def compute_coral_lambda(epoch: int, args) -> float:
-    warmup_epochs = max(1, args.coral_warmup_epochs)
-    ramp_epochs = max(warmup_epochs, args.coral_ramp_epochs)
-
-    if epoch < warmup_epochs:
-        return args.coral_lambda_start * (epoch + 1) / warmup_epochs
-    if epoch < ramp_epochs:
-        progress = (epoch - warmup_epochs + 1) / (ramp_epochs - warmup_epochs + 1)
-        return args.coral_lambda_start + progress * (args.coral_lambda_target - args.coral_lambda_start)
-    return args.coral_lambda_target

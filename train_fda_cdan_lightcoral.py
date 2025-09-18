@@ -1096,15 +1096,17 @@ def main():
     
     parser.add_argument('--num_classes', type=int, default=2, help='Number of classes for classification')
 
-    parser.add_argument('--source_wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/cap_data_recollect1')
-    parser.add_argument('--source_wear_dir2', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/cap_data_recollect2')
-    parser.add_argument('--source_nowear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/neckslice/refining_yaw_yaw')
-    parser.add_argument('--source_nowear_dir2', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/glasses/refining_yaw_yaw')
-    parser.add_argument('--target_nowear_dir', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_not_wear_hat')
-    parser.add_argument('--target_wear_dir', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_hat_wear')
+    parser.add_argument('--source_wear_dir', type=str, default='/home/ubuntu/KOR_DATA/sunglass_dataset/wear/wear_data1')
+    parser.add_argument('--source_wear_dir2', type=str, default='')
 
-    parser.add_argument('--fraction',type=float, default=0.2, help='Fraction of source data to use (0-1]')
-    parser.add_argument('--target_min_ratio', type=float, default=0.25, help='Minimum fraction of target-domain samples per training batch (0-1]')
+    parser.add_argument('--source_nowear_dir', type=str, default='/home/ubuntu/KOR_DATA/sunglass_dataset/nowear/no_wear_data1')
+    parser.add_argument('--source_nowear_dir2', type=str, default='')
+
+    parser.add_argument('--target_wear_dir', type=str, default='/home/ubuntu/KOR_DATA/sunglass_dataset/wear/wear_data2')
+    parser.add_argument('--target_nowear_dir', type=str, default='/home/ubuntu/KOR_DATA/sunglass_dataset/nowear/no_wear_data2')
+
+    parser.add_argument('--fraction',type=float, default=0.2, help='Fraction of source data to use (0-1)')
+    parser.add_argument('--target_min_ratio', type=float, default=0.25, help='Minimum fraction of target-domain samples per training batch (0-1)')
 
 
     parser.add_argument('--img_size', type=int, default=384)
@@ -1129,8 +1131,8 @@ def main():
 
     parser.add_argument('--light_coral_dim', type=int, default=128, help='Projection dimension for Light CORAL')
     parser.add_argument('--light_coral_trainable', action='store_true', help='Allow Light CORAL projector weights to be trainable')
-    parser.add_argument('--coral_lambda_start', type=float, default=0.01)
-    parser.add_argument('--coral_lambda_target', type=float, default=0.05)
+    parser.add_argument('--coral_lambda_start', type=float, default=1e-3)
+    parser.add_argument('--coral_lambda_target', type=float, default=1e-1)
     parser.add_argument('--coral_warmup_epochs', type=int, default=2)
     parser.add_argument('--coral_ramp_epochs', type=int, default=10)
     parser.add_argument('--coral_use_synth_fallback', action='store_true', help='Use synthetic target samples for CORAL when real target samples are absent for a class')

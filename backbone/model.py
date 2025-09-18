@@ -113,18 +113,18 @@ class EfficientNetV2_S(torch.nn.Module):
         #         param.requires_grad = False
 
 
-        for name , param in self.model.named_parameters():
-            if name.startswith('classifier') or name.startswith('conv_head') or name.startswith('bn2') or name.startswith('blocks.5.14') :
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
-        
-
         # for name , param in self.model.named_parameters():
-        #     if name.startswith('classifier') or name.startswith('conv_head') or name.startswith('bn2') or name.startswith('blocks.5.14') or name.startswith('blocks.5.13'):
+        #     if name.startswith('classifier') or name.startswith('conv_head') or name.startswith('bn2') or name.startswith('blocks.5.14') :
         #         param.requires_grad = True
         #     else:
         #         param.requires_grad = False
+        
+
+        for name , param in self.model.named_parameters():
+            if name.startswith('classifier') or name.startswith('conv_head') or name.startswith('bn2') or name.startswith('blocks.5.14') or name.startswith('blocks.5.13'):
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
         
         # print("--- Checking requires_grad status inside __init__ ---")
         # for name, param in self.model.named_parameters():
@@ -290,8 +290,12 @@ class ConvNext_V2_Tiny(nn.Module):
             param.requires_grad = False
 
         for name , param in self.model.named_parameters():
-            if name.startswith('head') or name.startswith('stages.3.blocks.0'):
+            if name.startswith('head') or name.startswith('stages.3.blocks.2'):
                 param.requires_grad = True
+                
+        # for name , param in self.model.named_parameters():
+        #     if name.startswith('head') or name.startswith('stages.3.blocks.1') or name.startswith('stages.3.blocks.2'):
+        #         param.requires_grad = True
 
         print("Verifying parameter freeze status:")
         total_params = 0
@@ -330,9 +334,10 @@ class ConvNext_V2_Tiny_DinoV3(nn.Module):
 
 if __name__ == "__main__":
 
-    # model = ConvNext_V2_Tiny()
+    model = ConvNext_V2_Tiny()
     
-    model = ConvNext_V2_Tiny_DinoV3()
+    # model = ConvNext_V2_Tiny_DinoV3()
+    
     backbone_params = sum(p.numel() for p in model.parameters())
     trainable_backbone_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model total params: {backbone_params:,}")
@@ -340,5 +345,5 @@ if __name__ == "__main__":
     print(f"traineable params percentage: {100 * trainable_backbone_params / backbone_params:.2f}%")
     print('==' * 30)
 
-    for name , param in model.named_parameters():
-        print(f"name: {name}, requires_grad: {param.requires_grad}")
+    # for name , param in model.named_parameters():
+    #     print(f"name: {name}, requires_grad: {param.requires_grad}")
