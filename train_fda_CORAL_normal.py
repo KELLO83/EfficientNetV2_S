@@ -600,6 +600,20 @@ def main_worker(rank, world_size, args):
     val_wear = [path for path, label in zip(val_list, val_labels) if label == 1]
     val_no_wear = [path for path, label in zip(val_list, val_labels) if label == 0]
 
+
+    if args.val_wear_dataset:
+        val_wear_extra = gather_paths(args.val_wear_dataset)
+        val_wear.extend(val_wear_extra)
+        if rank == 0:
+            logging.info(f"Added {len(val_wear_extra)} extra validation wear samples from {args.val_wear_dataset}")
+
+    if args.val_no_wear_dataset:
+        val_no_wear_extra = gather_paths(args.val_no_wear_dataset)
+        val_no_wear.extend(val_no_wear_extra)
+        if rank == 0:
+            logging.info(f"Added {len(val_no_wear_extra)} extra validation no-wear samples from {args.val_no_wear_dataset}")
+        
+
     balanced_batch_sampler = None
 
     if args.balanced_domain_sampler:
@@ -992,6 +1006,10 @@ def main():
     parser.add_argument('--fda_beta', type=float, default=0.05, help='Relative radius of low-frequency swap for FDA (0 disables)')
     parser.add_argument('--fda_prob', type=float, default=0.5, help='Probability of applying FDA to a training sample')
     parser.add_argument('--img_size', type=int, default=384, help='Input image size (assumed square)')
+
+
+    parser.add_argument('--val_wear_dataset', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/wear/wear_data2', help='Path to an additional validation dataset for the "wear" class.')
+    parser.add_argument('--val_no_wear_dataset', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/nowear/no_wear_data2', help='Path to an additional validation dataset for the "no wear" class.')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
