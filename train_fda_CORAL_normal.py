@@ -603,12 +603,14 @@ def main_worker(rank, world_size, args):
 
     if args.val_wear_dataset:
         val_wear_extra = gather_paths(args.val_wear_dataset)
+        val_wear_extra = val_wear_extra[:int(len(val_wear) * args.val_fraction)] 
         val_wear.extend(val_wear_extra)
         if rank == 0:
             logging.info(f"Added {len(val_wear_extra)} extra validation wear samples from {args.val_wear_dataset}")
 
     if args.val_no_wear_dataset:
         val_no_wear_extra = gather_paths(args.val_no_wear_dataset)
+        val_no_wear_extra = val_no_wear_extra[:int(len(val_no_wear) * args.val_fraction)]
         val_no_wear.extend(val_no_wear_extra)
         if rank == 0:
             logging.info(f"Added {len(val_no_wear_extra)} extra validation no-wear samples from {args.val_no_wear_dataset}")
@@ -992,7 +994,7 @@ def main():
     parser.add_argument('--pretrained', action='store_true', help='Use pretrained weights')
     parser.add_argument('--weight_path', type=str, default='', help='Path to model weights')
     parser.add_argument('--num_trainable_blocks', type=int, default=1, help='Number of last blocks to train in ConvNextV2-Tiny')
-    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='Directory to save model checkpoints')
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints_1', help='Directory to save model checkpoints')
     
     # Data arguments
     parser.add_argument('--wear_dir', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/wear/wear_data1')
@@ -1012,6 +1014,7 @@ def main():
 
     parser.add_argument('--val_wear_dataset', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/wear/wear_data2', help='Path to an additional validation dataset for the "wear" class.')
     parser.add_argument('--val_no_wear_dataset', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/nowear/no_wear_data2', help='Path to an additional validation dataset for the "no wear" class.')
+    parser.add_argument('--val_fraction' ,type=float , default=0.1 , help='Fraction of val_no_wear_dataset to use (0.0 to 1.0)')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
