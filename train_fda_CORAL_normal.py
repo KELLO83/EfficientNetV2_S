@@ -139,7 +139,7 @@ def find_max_batch_size(model, input_shape, device):
     print(f"Max batch size search completed. Maximum found limit {limit}: {max_found_bs}")
     return max_found_bs
 
-def get_model(model_name):
+def get_model(model_name, num_trainable_blocks=1):
     if model_name == 'efficientnetv2_s':
         model = EfficientNetV2_S()
     elif model_name == 'efficientnetv2_l':
@@ -147,7 +147,7 @@ def get_model(model_name):
     elif model_name == 'efficientnetv2_s_improved':
         model = EfficientNetV2_S_improved()
     elif model_name == 'convnext_v2_tiny':
-        model = ConvNext_V2_Tiny()
+        model = ConvNext_V2_Tiny(num_trainable_blocks=num_trainable_blocks)
     else:
         raise ValueError(f"Model {model_name} not recognized.")
     return model
@@ -716,7 +716,7 @@ def main_worker(rank, world_size, args):
 
     criterion = torch.nn.CrossEntropyLoss(weight=class_weights, label_smoothing=args.label_smoothing)
 
-    model = get_model(args.model).to(device)
+    model = get_model(args.model, num_trainable_blocks=args.num_trainable_blocks).to(device)
 
     if args.pretrained and os.path.isfile(args.weight_path):
         logging.info(f"Loading weights from {args.weight_path}")
@@ -775,7 +775,7 @@ def main_worker(rank, world_size, args):
     ema = EMA(unwrap_model(model), decay=args.ema_decay) if args.use_ema else None
     
     if rank == 0:
-        checkpoint_dir = 'checkpoints'
+        checkpoint_dir = args.checkpoint_dir
         os.makedirs(checkpoint_dir, exist_ok=True)
 
     for epoch in range(args.epochs):
@@ -991,7 +991,9 @@ def main():
     parser.add_argument('--model', type=str, default='convnext_v2_tiny', choices=['efficientnetv2_s', 'efficientnetv2_l', 'efficientnetv2_s_improved' , 'convnext_v2_tiny'], help='Model type')
     parser.add_argument('--pretrained', action='store_true', help='Use pretrained weights')
     parser.add_argument('--weight_path', type=str, default='', help='Path to model weights')
-
+    parser.add_argument('--num_trainable_blocks', type=int, default=1, help='Number of last blocks to train in ConvNextV2-Tiny')
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='Directory to save model checkpoints')
+    
     # Data arguments
     parser.add_argument('--wear_dir', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/wear/wear_data1')
     parser.add_argument('--wear_dir2' , type=str , default='')
@@ -1013,7 +1015,7 @@ def main():
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=2048, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=512, help='Batch size for training')
     parser.add_argument('--find_batch_size', action='store_true', help='Find the maximum batch size before training')
     parser.add_argument('--no_confirm', action='store_true', help='Skip argument confirmation prompt')
     parser.add_argument('--data_check', action='store_true', help='Visualize a batch of data to check augmentations')
@@ -1045,12 +1047,12 @@ def main():
     parser.add_argument('--wandb', action='store_true', help='Use wandb or not')
     parser.add_argument('--project', type=str, default='ConvNextV2_FDA_CORAL', help='wandb project name')
     parser.add_argument('--wandb_name', type=str, default='FDA_CORAL_LastBlock_GRAD_CLIP_ddp', help='wandb experiment name')
-    
+
     args = parser.parse_args()
 
     if args.find_batch_size:
         print("Finding max batch size...")
-        temp_model = get_model(args.model)
+        temp_model = get_model(args.model , args.num_trainable_blocks)
         # Use the configured img_size for the batch size search
         max_bs = find_max_batch_size(temp_model, input_shape=(3, args.img_size, args.img_size), device='cuda:0')
         if max_bs:

@@ -282,20 +282,25 @@ class EfficientNetV2_S_DANN(nn.Module):
 
 
 class ConvNext_V2_Tiny(nn.Module):
-    def __init__(self, num_classes=2):
+    def __init__(self, num_classes=2, num_trainable_blocks=1):
         super(ConvNext_V2_Tiny, self).__init__()
-        self.model = timm.create_model('convnextv2_tiny.fcmae_ft_in22k_in1k_384', pretrained=True , num_classes=num_classes)
-        
-        for name , param in self.model.named_parameters():
+        self.model = timm.create_model('convnextv2_tiny.fcmae_ft_in22k_in1k_384', pretrained=True, num_classes=num_classes)
+
+        for param in self.model.parameters():
             param.requires_grad = False
 
-        for name , param in self.model.named_parameters():
-            if name.startswith('head') or name.startswith('stages.3.blocks.2'):
+        unfreeze_prefixes = ['head']
+        if num_trainable_blocks > 0:
+            # convnextv2_tiny's last stage ('stages.3') has 3 blocks.
+            num_blocks_in_last_stage = 3
+            start_block_idx = max(0, num_blocks_in_last_stage - num_trainable_blocks)
+            
+            for i in range(start_block_idx, num_blocks_in_last_stage):
+                unfreeze_prefixes.append(f'stages.3.blocks.{i}')
+
+        for name, param in self.model.named_parameters():
+            if any(name.startswith(prefix) for prefix in unfreeze_prefixes):
                 param.requires_grad = True
-                
-        # for name , param in self.model.named_parameters():
-        #     if name.startswith('head') or name.startswith('stages.3.blocks.1') or name.startswith('stages.3.blocks.2'):
-        #         param.requires_grad = True
 
         print("Verifying parameter freeze status:")
         total_params = 0
@@ -309,6 +314,7 @@ class ConvNext_V2_Tiny(nn.Module):
         print(f"Total parameters: {total_params}")
         print(f"Trainable parameters: {trainable_params}")
         print(f"Percentage of trainable parameters: {100.0 * trainable_params / total_params:.2f}%")
+
 
     def forward(self, x, return_features: bool = False):
         features = self.model.forward_features(x)
@@ -334,7 +340,7 @@ class ConvNext_V2_Tiny_DinoV3(nn.Module):
 
 if __name__ == "__main__":
 
-    model = ConvNext_V2_Tiny()
+    model = ConvNext_V2_Tiny(num_trainable_blocks=3)
     
     # model = ConvNext_V2_Tiny_DinoV3()
     
@@ -345,5 +351,5 @@ if __name__ == "__main__":
     print(f"traineable params percentage: {100 * trainable_backbone_params / backbone_params:.2f}%")
     print('==' * 30)
 
-    # for name , param in model.named_parameters():
-    #     print(f"name: {name}, requires_grad: {param.requires_grad}")
+    for name , param in model.named_parameters():
+        print(f"name: {name}, requires_grad: {param.requires_grad}")
