@@ -333,7 +333,7 @@ def parse_args():
     parser.add_argument('--nowear', type=str, help='Directory with negative class images (no-wear)')
     parser.add_argument('--img-size', type=int, default=384, help='Square image size for resizing')
     parser.add_argument('--model', type=str, default='convNextv2_tiny', choices=['s', 's_dann', 'l','convNextv2_tiny'], help='Model variant: s, s_dann, or l')
-    parser.add_argument('--weights', type=str, default='convnext_v2_tiny_FDA_CORAL_CDAN_hat_sota/best_model.pth', help='Path to model weights .pth')
+    parser.add_argument('--weights', type=str, default='checkpoints/best_model.pth', help='Path to model weights .pth')
     parser.add_argument('--batch-size', type=int, default=64, help='Batch size per process')
 
     args = parser.parse_args()

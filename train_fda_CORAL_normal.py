@@ -976,26 +976,26 @@ def main():
     # Model arguments
     parser.add_argument('--model', type=str, default='convnext_v2_tiny', choices=['efficientnetv2_s', 'efficientnetv2_l', 'efficientnetv2_s_improved' , 'convnext_v2_tiny'], help='Model type')
     parser.add_argument('--pretrained', action='store_true', help='Use pretrained weights')
-    parser.add_argument('--weight_path', type=str, default='checkpoints/best_model.pth', help='Path to model weights')
+    parser.add_argument('--weight_path', type=str, default='', help='Path to model weights')
 
     # Data arguments
-    parser.add_argument('--wear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/cap_data_recollect1')
-    parser.add_argument('--wear_dir2' , type=str , default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/hat/cap_data_recollect2')
+    parser.add_argument('--wear_dir', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/wear/wear_data1')
+    parser.add_argument('--wear_dir2' , type=str , default='')
 
-    parser.add_argument('--nowear_dir', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/neckslice/refining_yaw_yaw', help='Directory for "no wear" images')
-    parser.add_argument('--nowear_dir2', type=str, default='/media/ubuntu/76A01D5EA01D25E1/009.패션 액세서리 착용 데이터/01-1.정식개방데이터/Training/01.원천데이터/glasses/refining_yaw_yaw', help='Directory for additional "no wear" images')
+    parser.add_argument('--nowear_dir', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/nowear/no_wear_data1', help='Directory for "no wear" images')
+    parser.add_argument('--nowear_dir2', type=str, default='', help='Directory for additional "no wear" images')
 
     parser.add_argument('--fraction' ,type=float , default=1 , help='Fraction of nowear_dir2 to use (0.0 to 1.0)')
     parser.add_argument('--ddp', action='store_true', help='Use Distributed Data Parallel (DDP) if multiple GPUs are available')
 
-    parser.add_argument('--FDA_data', type=str, default='/home/ubuntu/KOR_DATA/high_resolution_train_data_640', help='FDA data path')
+    parser.add_argument('--FDA_data', type=str, default='/home/ubuntu/Downloads/high_train_112', help='FDA data path')
     parser.add_argument('--fda_beta', type=float, default=0.05, help='Relative radius of low-frequency swap for FDA (0 disables)')
     parser.add_argument('--fda_prob', type=float, default=0.5, help='Probability of applying FDA to a training sample')
     parser.add_argument('--img_size', type=int, default=384, help='Input image size (assumed square)')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=48, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=2048, help='Batch size for training')
     parser.add_argument('--find_batch_size', action='store_true', help='Find the maximum batch size before training')
     parser.add_argument('--no_confirm', action='store_true', help='Skip argument confirmation prompt')
     parser.add_argument('--data_check', action='store_true', help='Visualize a batch of data to check augmentations')
@@ -1005,7 +1005,7 @@ def main():
     parser.add_argument('--grad_clip_norm', type=float, default=1.0, help='Max gradient norm for clipping (<=0 disables)')
     parser.add_argument('--balanced_domain_sampler', action='store_true', help='Enable domain/class balanced batch sampling (supports DDP)')
     parser.add_argument('--balanced_min_per_group', type=int, default=2, help='Minimum samples per (domain, class) group when using balanced sampler')
-    parser.add_argument('--coral_lambda', type=float, default=0.5, help='Fixed CORAL weight applied from the first epoch')
+    parser.add_argument('--coral_lambda', type=float, default=0.15, help='Fixed CORAL weight applied from the first epoch')
 
     # Boolean flags with default True via paired options
     parser.add_argument('--bn_freeze_stats', dest='bn_freeze_stats', action='store_true', help='Freeze BN running stats during training')
@@ -1021,7 +1021,7 @@ def main():
     parser.add_argument('--tta_flip', action='store_true', help='Enable horizontal flip TTA at validation')
 
     # Set defaults for paired booleans
-    parser.set_defaults(bn_freeze_stats=True, lrd=True, use_ema=True, ddp=True , balanced_domain_sampler=True)
+    parser.set_defaults(bn_freeze_stats=True, lrd=True, use_ema=True, ddp=False , balanced_domain_sampler=False)
 
     # W&B arguments
     parser.add_argument('--wandb', action='store_true', help='Use wandb or not')

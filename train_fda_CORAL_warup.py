@@ -180,6 +180,30 @@ def mixup_data(x: torch.Tensor, y: torch.Tensor, alpha: float):
     return mixed_x, y_a, y_b, lam
 
 
+def compute_coral_lambda(
+    progress_epoch: float,
+    warmup_epochs: int,
+    ramp_epochs: int,
+    lambda_start: float,
+    lambda_target: float,
+) -> float:
+    """Piecewise linear schedule for CORAL weight with warmup and ramp."""
+
+    clamped_progress = max(progress_epoch, 0.0)
+
+    if warmup_epochs > 0 and clamped_progress < warmup_epochs:
+        warmup_ratio = clamped_progress / max(warmup_epochs, 1e-8)
+        return lambda_start * warmup_ratio
+
+    remaining = clamped_progress - max(warmup_epochs, 0)
+
+    if ramp_epochs > 0 and remaining < ramp_epochs:
+        ramp_ratio = remaining / max(ramp_epochs, 1e-8)
+        return lambda_start + (lambda_target - lambda_start) * ramp_ratio
+
+    return lambda_target
+
+
 def deep_coral_loss(source: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Deep CORAL loss as defined in https://arxiv.org/abs/1607.01719."""
     if source.ndim > 2:
@@ -765,7 +789,6 @@ def main_worker(rank, world_size, args):
         os.makedirs(checkpoint_dir, exist_ok=True)
 
     for epoch in range(args.epochs):
-        current_coral_lambda = args.coral_lambda
         if train_sampler:
             train_sampler.set_epoch(epoch)
         elif balanced_batch_sampler and hasattr(balanced_batch_sampler, 'set_epoch'):
@@ -780,9 +803,13 @@ def main_worker(rank, world_size, args):
         correct_train = 0
         total_train = 0
         coral_loss_sum = 0.0
+        coral_lambda_sum = 0.0
+        num_train_steps = 0
+        last_coral_lambda = 0.0
+        trainloader_len = max(len(trainloader), 1)
         
         pbar_train = tqdm(trainloader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]", disable=(rank != 0))
-        for batch in pbar_train:
+        for batch_idx, batch in enumerate(pbar_train):
             if len(batch) == 3:
                 data_input, label, domain_labels = batch
                 domain_labels = domain_labels.to(device, non_blocking=True)
@@ -796,6 +823,14 @@ def main_worker(rank, world_size, args):
             
             # Use autocast only when CUDA is available (safer across PyTorch versions)
             with torch.amp.autocast(device_type=device.type, enabled=(device.type == 'cuda')):
+                progress = epoch + (batch_idx / trainloader_len)
+                current_coral_lambda = compute_coral_lambda(
+                    progress,
+                    args.coral_warmup_epochs,
+                    args.coral_ramp_epochs,
+                    args.coral_lambda_start,
+                    args.coral_lambda_target,
+                )
                 logits_base, features = model(data_input, return_features=True)
                 if features.ndim > 2:
                     features = features.mean(dim=list(range(2, features.ndim)))
@@ -840,6 +875,9 @@ def main_worker(rank, world_size, args):
 
             train_loss += loss.item()
             coral_loss_sum += coral_val.item()
+            coral_lambda_sum += current_coral_lambda
+            num_train_steps += 1
+            last_coral_lambda = current_coral_lambda
             _, predicted = torch.max(logit.data, 1)
             total_train += label.size(0)
             if args.mixup_alpha > 0.0:
@@ -856,6 +894,7 @@ def main_worker(rank, world_size, args):
                 })
 
         train_accuracy = 100 * correct_train / total_train
+        avg_coral_lambda = coral_lambda_sum / max(num_train_steps, 1)
 
         if ema is not None and args.ema_eval:
             ema.apply_shadow(unwrap_model(model))
@@ -896,14 +935,17 @@ def main_worker(rank, world_size, args):
                "Train Loss": train_loss / len(trainloader),
                "Train Accuracy": train_accuracy,
                "Train Coral Loss": coral_loss_sum / len(trainloader),
-               "Coral Lambda": current_coral_lambda,
+               "Coral Lambda": avg_coral_lambda,
                "Val Loss": avg_val_loss,
                "Val Accuracy": val_accuracy,
                "Learning Rate": scheduler.get_last_lr()[0],
             })
 
         if rank == 0:
-            logging.info(f"Epoch {epoch+1}, Train Loss: {train_loss/len(trainloader):.4f}, Train Acc: {train_accuracy:.2f}%, Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.2f}%, Coral λ: {current_coral_lambda:.4f}")
+            logging.info(
+                f"Epoch {epoch+1}, Train Loss: {train_loss/len(trainloader):.4f}, Train Acc: {train_accuracy:.2f}%, "
+                f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.2f}%, Coral λ: {last_coral_lambda:.4f}"
+            )
 
             # Save periodic checkpoints
             if (epoch + 1) % 2 == 0 :
