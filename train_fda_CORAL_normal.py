@@ -1019,7 +1019,7 @@ def main():
     parser.add_argument('--val_wear_dataset', type=str, default='/home/ubuntu/Downloads/compress/hat/merged')
     parser.add_argument('--val_no_wear_dataset', type=str, default='/home/ubuntu/Downloads/compress/neckslice/refining_yaw_yaw')
     parser.add_argument('--val_fraction' ,type=float , default=1 , help='Fraction of val_no_wear_dataset to use (0.0 to 1.0)')
-    parser.add_argument('--swap' , default=True )
+    parser.add_argument('--swap' , default=False )
     
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
