@@ -899,7 +899,8 @@ def main_worker(rank, world_size, args):
                 total_val += label.size(0)
                 correct_val += (predicted == label).sum().item()
                 if rank == 0:
-                    pbar_val.set_postfix({'loss': loss.item()})
+                    running_acc = 100.0 * correct_val / total_val if total_val > 0 else 0.0
+                    pbar_val.set_postfix({'loss': loss.item(), 'acc': running_acc})
 
         val_accuracy = 100 * correct_val / total_val
         avg_val_loss = val_loss / len(valloader)
@@ -935,7 +936,8 @@ def main_worker(rank, world_size, args):
                     'model_state_dict': cleaned_state_dict,
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
-                    'best_val_loss': best_val_loss
+                    'best_val_loss': best_val_loss,
+                    'best_val_acc': best_val_acc
                 }
 
                 checkpoint_path = os.path.join(checkpoint_dir, f'{args.model}_epoch_{epoch+1}.pth')
@@ -944,7 +946,8 @@ def main_worker(rank, world_size, args):
 
 
             # Save best model
-            if avg_val_loss < best_val_loss:
+            if val_accuracy > best_val_acc:
+                best_val_acc = val_accuracy
                 best_val_loss = avg_val_loss
                 state_to_save = model.module.state_dict() if world_size > 1 else model.state_dict()
                 
@@ -958,11 +961,14 @@ def main_worker(rank, world_size, args):
                     'model_state_dict': cleaned_state_dict,
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
-                    'best_val_loss': best_val_loss
+                    'best_val_loss': best_val_loss,
+                    'best_val_acc': best_val_acc
                 }
                 best_model_path = os.path.join(checkpoint_dir, 'best_model.pth')
                 torch.save(checkpoint, best_model_path)
-                logging.info(f"Saved best model to {best_model_path} with val loss: {best_val_loss:.4f}")
+                logging.info(
+                    f"Saved best model to {best_model_path} with val acc: {best_val_acc:.2f}% (val loss: {best_val_loss:.4f})"
+                )
 
             early_stopping(avg_val_loss)
 
@@ -1014,7 +1020,7 @@ def main():
 
     parser.add_argument('--val_wear_dataset', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/wear/wear_data2', help='Path to an additional validation dataset for the "wear" class.')
     parser.add_argument('--val_no_wear_dataset', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/nowear/no_wear_data2', help='Path to an additional validation dataset for the "no wear" class.')
-    parser.add_argument('--val_fraction' ,type=float , default=0.1 , help='Fraction of val_no_wear_dataset to use (0.0 to 1.0)')
+    parser.add_argument('--val_fraction' ,type=float , default=0.4 , help='Fraction of val_no_wear_dataset to use (0.0 to 1.0)')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
