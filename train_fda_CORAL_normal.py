@@ -1007,7 +1007,7 @@ def main():
     parser.add_argument('--wear_dir2' , type=str , default='')
 
     parser.add_argument('--nowear_dir', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/nowear/no_wear_data1', help='Directory for "no wear" images')
-    parser.add_argument('--nowear_dir2', type=str, default='', help='Directory for additional "no wear" images')
+    parser.add_argument('--nowear_dir2', type=str, default='')
 
     parser.add_argument('--fraction' ,type=float , default=1 , help='Fraction of nowear_dir2 to use (0.0 to 1.0)')
     parser.add_argument('--ddp', action='store_true', help='Use Distributed Data Parallel (DDP) if multiple GPUs are available')
@@ -1018,10 +1018,11 @@ def main():
     parser.add_argument('--img_size', type=int, default=384, help='Input image size (assumed square)')
 
 
-    parser.add_argument('--val_wear_dataset', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/wear/wear_data2', help='Path to an additional validation dataset for the "wear" class.')
-    parser.add_argument('--val_no_wear_dataset', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/nowear/no_wear_data2', help='Path to an additional validation dataset for the "no wear" class.')
+    parser.add_argument('--val_wear_dataset', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/wear/wear_data2')
+    parser.add_argument('--val_no_wear_dataset', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/nowear/no_wear_data2')
     parser.add_argument('--val_fraction' ,type=float , default=0.4 , help='Fraction of val_no_wear_dataset to use (0.0 to 1.0)')
-
+    parser.add_argument('--swap' , default=True )
+    
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=512, help='Batch size for training')
@@ -1058,6 +1059,10 @@ def main():
     parser.add_argument('--wandb_name', type=str, default='FDA_CORAL_LastBlock_GRAD_CLIP_ddp', help='wandb experiment name')
 
     args = parser.parse_args()
+
+    if args.swap:
+        args.wear_dir , args.nowear_dir = args.val_wear_dataset , args.val_no_wear_dataset
+        args.val_fraction = 1.0
 
     if args.find_batch_size:
         print("Finding max batch size...")
