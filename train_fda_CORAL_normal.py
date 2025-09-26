@@ -1061,8 +1061,10 @@ def main():
     args = parser.parse_args()
 
     if args.swap:
+        print("Swapping training and validation datasets as per --swap flag.!!!!!!!!!!!!!!!1")
         args.wear_dir , args.nowear_dir = args.val_wear_dataset , args.val_no_wear_dataset
         args.val_fraction = 1.0
+        args.FDA_data = '/home/ubuntu/Downloads/compress/neckslice/refining_yaw_yaw'
 
     if args.find_batch_size:
         print("Finding max batch size...")
