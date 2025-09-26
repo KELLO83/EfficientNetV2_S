@@ -333,17 +333,17 @@ def parse_args():
     parser.add_argument('--nowear', type=str, help='Directory with negative class images (no-wear)')
     parser.add_argument('--img-size', type=int, default=384, help='Square image size for resizing')
     parser.add_argument('--model', type=str, default='convNextv2_tiny', choices=['s', 's_dann', 'l','convNextv2_tiny'], help='Model variant: s, s_dann, or l')
-    parser.add_argument('--weights', type=str, default='checkpoints/best_model.pth', help='Path to model weights .pth')
+    parser.add_argument('--weights', type=str, default='best_model_sunglass.pth', help='Path to model weights .pth')
     parser.add_argument('--batch-size', type=int, default=64, help='Batch size per process')
 
     args = parser.parse_args()
 
     # Hardcoded paths as a fallback
     if not args.wear:
-        args.wear = '/home/ubuntu/KOR_DATA/high_resolution_hat_wear'
+        args.wear = '/home/ubuntu/KOR_DATA/sunglass_test/wear'
 
     if not args.nowear:
-        args.nowear = '/home/ubuntu/KOR_DATA/high_resolution_not_wear_hat'
+        args.nowear = '/home/ubuntu/KOR_DATA/sunglass_test/not_wear'
 
     return args
 

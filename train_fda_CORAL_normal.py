@@ -39,8 +39,6 @@ from typing import Optional, List
 from torch.nn.utils import clip_grad_norm_
 from torch.nn.utils import clip_grad_norm_
 
-os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
-
 def setup_ddp(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
@@ -685,10 +683,10 @@ def main_worker(rank, world_size, args):
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
 
     if balanced_batch_sampler is not None:
-        trainloader = data.DataLoader(train_dataset, batch_sampler=balanced_batch_sampler, pin_memory=True, num_workers=4)
+        trainloader = data.DataLoader(train_dataset, batch_sampler=balanced_batch_sampler, pin_memory=True, num_workers=os.cpu_count())
     else:
-        trainloader = data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None), pin_memory=True, num_workers=4, sampler=train_sampler)
-    valloader = data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True, num_workers=4, sampler=val_sampler)
+        trainloader = data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None), pin_memory=True, num_workers=os.cpu_count(), sampler=train_sampler)
+    valloader = data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True, num_workers=os.cpu_count(), sampler=val_sampler)
 
     # Run data_check safely under DDP (only rank 0 shows window)
 
@@ -946,7 +944,7 @@ def main_worker(rank, world_size, args):
 
 
             # Save best model
-            if val_accuracy > best_val_acc:
+            if val_accuracy >= best_val_acc and avg_val_loss <= best_val_loss:
                 best_val_acc = val_accuracy
                 best_val_loss = avg_val_loss
                 state_to_save = model.module.state_dict() if world_size > 1 else model.state_dict()
@@ -1000,27 +998,27 @@ def main():
     parser.add_argument('--pretrained', action='store_true', help='Use pretrained weights')
     parser.add_argument('--weight_path', type=str, default='', help='Path to model weights')
     parser.add_argument('--num_trainable_blocks', type=int, default=1, help='Number of last blocks to train in ConvNextV2-Tiny')
-    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints_1', help='Directory to save model checkpoints')
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoint', help='Directory to save model checkpoints')
     
     # Data arguments
-    parser.add_argument('--wear_dir', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/wear/wear_data1')
+    parser.add_argument('--wear_dir', type=str, default='/home/ubuntu/Downloads/hat_dataset/high_resolution_hat_wear')
     parser.add_argument('--wear_dir2' , type=str , default='')
 
-    parser.add_argument('--nowear_dir', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/nowear/no_wear_data1', help='Directory for "no wear" images')
+    parser.add_argument('--nowear_dir', type=str, default='/home/ubuntu/Downloads/hat_dataset/high_resolution_not_wear_hat', help='Directory for "no wear" images')
     parser.add_argument('--nowear_dir2', type=str, default='')
 
     parser.add_argument('--fraction' ,type=float , default=1 , help='Fraction of nowear_dir2 to use (0.0 to 1.0)')
     parser.add_argument('--ddp', action='store_true', help='Use Distributed Data Parallel (DDP) if multiple GPUs are available')
 
-    parser.add_argument('--FDA_data', type=str, default='/home/ubuntu/Downloads/high_train_112', help='FDA data path')
+    parser.add_argument('--FDA_data', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/nowear/no_wear_data1', help='FDA data path')
     parser.add_argument('--fda_beta', type=float, default=0.05, help='Relative radius of low-frequency swap for FDA (0 disables)')
     parser.add_argument('--fda_prob', type=float, default=0.5, help='Probability of applying FDA to a training sample')
     parser.add_argument('--img_size', type=int, default=384, help='Input image size (assumed square)')
 
 
-    parser.add_argument('--val_wear_dataset', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/wear/wear_data2')
-    parser.add_argument('--val_no_wear_dataset', type=str, default='/home/ubuntu/Downloads/sunglass_dataset/nowear/no_wear_data2')
-    parser.add_argument('--val_fraction' ,type=float , default=0.4 , help='Fraction of val_no_wear_dataset to use (0.0 to 1.0)')
+    parser.add_argument('--val_wear_dataset', type=str, default='/home/ubuntu/Downloads/compress/hat/merged')
+    parser.add_argument('--val_no_wear_dataset', type=str, default='/home/ubuntu/Downloads/compress/neckslice/refining_yaw_yaw')
+    parser.add_argument('--val_fraction' ,type=float , default=1 , help='Fraction of val_no_wear_dataset to use (0.0 to 1.0)')
     parser.add_argument('--swap' , default=True )
     
     # Training arguments
@@ -1061,7 +1059,6 @@ def main():
     args = parser.parse_args()
 
     if args.swap:
-        print("Swapping training and validation datasets as per --swap flag.!!!!!!!!!!!!!!!1")
         args.wear_dir , args.nowear_dir = args.val_wear_dataset , args.val_no_wear_dataset
         args.val_fraction = 1.0
         args.FDA_data = '/home/ubuntu/Downloads/compress/neckslice/refining_yaw_yaw'
@@ -1078,6 +1075,9 @@ def main():
     print("--- Training Arguments ---")
     for var in vars(args):
         print(f"{var}: {getattr(args, var)}")
+
+    if args.swap:
+        print("Note: --swap is enabled, training with swapped  val wear/no-wear datasets.")
     print("--------------------------")
 
     if not args.no_confirm:
